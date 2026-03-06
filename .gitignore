@@ -1,0 +1,55 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.svelte-kit/
+.output/
+.vercel/
+.netlify/
+.wrangler/
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+!.env.test
+*service-account*.json
+*credentials*.json
+*.pem
+*.key
+*.p12
+
+# Generated files
+*.log
+artifacts/generated_images/
+tmp/
+temp/
