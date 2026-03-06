@@ -5,16 +5,19 @@ import base64
 from datetime import datetime
 import json
 import os
+from pathlib import Path
 import random
 import re
 import sys
+import tempfile
 import time
 import hashlib
+from uuid import uuid4
 from typing import Any, cast
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -128,6 +131,13 @@ DEFAULT_LIVE_AUDIO_SAMPLE_RATE = int(os.getenv("AERIVON_LIVE_AUDIO_SAMPLE_RATE",
 
 API_KEY_ENV_VARS = ("GOOGLE_CLOUD_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
 
+VEO_JOB_OUTPUT_DIR = Path(
+    os.getenv("AERIVON_VEO_OUTPUT_DIR", str(Path(tempfile.gettempdir()) / "aerivon_veo_jobs"))
+)
+VEO_JOB_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+VEO_JOBS: dict[str, dict[str, Any]] = {}
+VEO_JOB_SUBSCRIBERS: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+
 
 def _get_api_key() -> str | None:
     for name in API_KEY_ENV_VARS:
@@ -151,6 +161,170 @@ def _make_genai_client(*, prefer_vertex: bool, project: str | None, location: st
         "Missing credentials. Set GOOGLE_GENAI_USE_VERTEXAI=true + GOOGLE_CLOUD_PROJECT (and ADC), "
         "or set an API key env var (GEMINI_API_KEY / GOOGLE_API_KEY / GOOGLE_CLOUD_API_KEY)."
     )
+
+
+def _extract_generated_videos_from_operation(operation: Any) -> list[Any]:
+    response = getattr(operation, "response", None)
+    if response is None:
+        return []
+
+    for attr in ("generated_videos", "generatedVideos", "videos"):
+        val = getattr(response, attr, None)
+        if isinstance(val, list):
+            return val
+
+    if isinstance(response, dict):
+        for key in ("generated_videos", "generatedVideos", "videos"):
+            val = response.get(key)
+            if isinstance(val, list):
+                return val
+
+    return []
+
+
+def _extract_video_bytes(video_ref: Any) -> bytes | None:
+    candidates = [
+        video_ref,
+        getattr(video_ref, "video", None),
+        getattr(video_ref, "file", None),
+        getattr(video_ref, "video_file", None),
+    ]
+
+    for cand in candidates:
+        if cand is None:
+            continue
+
+        if isinstance(cand, (bytes, bytearray)):
+            return bytes(cand)
+
+        data = getattr(cand, "data", None)
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+
+        video_bytes = getattr(cand, "video_bytes", None)
+        if isinstance(video_bytes, (bytes, bytearray)):
+            return bytes(video_bytes)
+
+    return None
+
+
+def _generate_veo_video_blocking(*, prompt: str, model: str, duration_seconds: int, aspect_ratio: str) -> bytes:
+    use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in {"1", "true", "yes"}
+    project = os.getenv("GOOGLE_CLOUD_PROJECT")
+    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+    client = _make_genai_client(prefer_vertex=bool(use_vertex and project), project=project, location=location)
+    models_api = getattr(client, "models", None)
+    if models_api is None:
+        raise RuntimeError("GenAI client has no models API.")
+
+    config = {
+        "duration_seconds": duration_seconds,
+        "aspect_ratio": aspect_ratio,
+    }
+
+    if hasattr(models_api, "generate_videos"):
+        operation = models_api.generate_videos(model=model, prompt=prompt, config=config)
+    elif hasattr(models_api, "generate_video"):
+        operation = models_api.generate_video(model=model, prompt=prompt, config=config)
+    else:
+        raise RuntimeError("Installed google-genai SDK does not expose generate_videos().")
+
+    operations_api = getattr(client, "operations", None)
+    if operations_api is not None and hasattr(operations_api, "get"):
+        while not bool(getattr(operation, "done", False)):
+            time.sleep(8)
+            operation = operations_api.get(operation)
+
+    generated = _extract_generated_videos_from_operation(operation)
+    if not generated:
+        raise RuntimeError("Veo finished without generated video output.")
+
+    video_bytes = _extract_video_bytes(generated[0])
+    if not video_bytes:
+        raise RuntimeError("Veo finished but no downloadable video bytes were found.")
+
+    return video_bytes
+
+
+def _veo_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "veo_status",
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "prompt": job.get("prompt", ""),
+        "model": job.get("model", ""),
+        "duration_seconds": job.get("duration_seconds", 0),
+        "aspect_ratio": job.get("aspect_ratio", "16:9"),
+        "video_url": job.get("video_url"),
+        "error": job.get("error"),
+        "updated_at": job.get("updated_at"),
+    }
+
+
+async def _veo_publish(job_id: str, payload: dict[str, Any]) -> None:
+    payload.setdefault("type", "veo_status")
+    payload.setdefault("job_id", job_id)
+    payload.setdefault("updated_at", time.time())
+
+    job = VEO_JOBS.get(job_id)
+    if job is not None:
+        job["updated_at"] = payload["updated_at"]
+        for key in ("status", "progress", "video_url", "error"):
+            if key in payload:
+                job[key] = payload[key]
+
+    queues = list(VEO_JOB_SUBSCRIBERS.get(job_id, set()))
+    for queue in queues:
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass
+
+
+async def _run_veo_job(job_id: str) -> None:
+    job = VEO_JOBS.get(job_id)
+    if not job:
+        return
+
+    await _veo_publish(job_id, {"status": "running", "progress": 10})
+
+    prompt = str(job.get("prompt") or "").strip()
+    model = str(job.get("model") or "veo-3.0-generate-001").strip()
+    duration_seconds = int(job.get("duration_seconds") or 6)
+    aspect_ratio = str(job.get("aspect_ratio") or "16:9")
+
+    try:
+        await _veo_publish(job_id, {"status": "running", "progress": 35})
+        video_bytes = await asyncio.to_thread(
+            _generate_veo_video_blocking,
+            prompt=prompt,
+            model=model,
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+        )
+
+        out_path = VEO_JOB_OUTPUT_DIR / f"{job_id}.mp4"
+        out_path.write_bytes(video_bytes)
+
+        await _veo_publish(
+            job_id,
+            {
+                "status": "completed",
+                "progress": 100,
+                "video_url": f"/veo/jobs/{job_id}/video",
+            },
+        )
+    except Exception as exc:
+        await _veo_publish(
+            job_id,
+            {
+                "status": "failed",
+                "progress": 100,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
 
 # Live generation tuning. Live sessions can default to relatively small output budgets unless specified.
 # Bump the default so audio replies are less likely to stop mid-sentence.
@@ -1300,6 +1474,104 @@ class SpeakRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     lang: str | None = None
     voice: str | None = None
+
+
+class VeoJobRequest(BaseModel):
+    prompt: str = Field(min_length=8, max_length=5000)
+    model: str = Field(default_factory=lambda: os.getenv("AERIVON_VIDEO_MODEL", "veo-3.0-generate-001"))
+    duration_seconds: int = Field(default=6, ge=4, le=20)
+    aspect_ratio: str = Field(default="16:9")
+
+
+@app.post("/veo/jobs")
+async def create_veo_job(payload: VeoJobRequest, request: Request) -> dict[str, Any]:
+    job_id = uuid4().hex[:12]
+    created_at = time.time()
+
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "prompt": payload.prompt.strip(),
+        "model": payload.model.strip() or "veo-3.0-generate-001",
+        "duration_seconds": int(payload.duration_seconds),
+        "aspect_ratio": payload.aspect_ratio.strip() or "16:9",
+        "video_url": None,
+        "error": None,
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    VEO_JOBS[job_id] = job
+
+    asyncio.create_task(_run_veo_job(job_id))
+
+    ws_scheme = "wss" if request.url.scheme == "https" else "ws"
+    ws_url = f"{ws_scheme}://{request.url.netloc}/ws/veo/{job_id}"
+
+    response = _veo_job_snapshot(job)
+    response["ws_url"] = ws_url
+    return response
+
+
+@app.get("/veo/jobs/{job_id}")
+async def get_veo_job(job_id: str, request: Request) -> dict[str, Any]:
+    job = VEO_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    ws_scheme = "wss" if request.url.scheme == "https" else "ws"
+    ws_url = f"{ws_scheme}://{request.url.netloc}/ws/veo/{job_id}"
+
+    response = _veo_job_snapshot(job)
+    response["ws_url"] = ws_url
+    return response
+
+
+@app.get("/veo/jobs/{job_id}/video")
+async def get_veo_job_video(job_id: str) -> FileResponse:
+    job = VEO_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="Video not ready")
+
+    path = VEO_JOB_OUTPUT_DIR / f"{job_id}.mp4"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Video file missing")
+
+    return FileResponse(path, media_type="video/mp4", filename=f"aerivon_{job_id}.mp4")
+
+
+@app.websocket("/ws/veo/{job_id}")
+async def ws_veo_status(websocket: WebSocket, job_id: str) -> None:
+    await websocket.accept()
+
+    job = VEO_JOBS.get(job_id)
+    if not job:
+        await websocket.send_json({"type": "veo_status", "job_id": job_id, "status": "missing", "error": "Job not found"})
+        await websocket.close(code=1008)
+        return
+
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
+    VEO_JOB_SUBSCRIBERS.setdefault(job_id, set()).add(queue)
+
+    try:
+        await websocket.send_json(_veo_job_snapshot(job))
+        while True:
+            event = await queue.get()
+            await websocket.send_json(event)
+            status = str(event.get("status") or "")
+            if status in {"completed", "failed"}:
+                await websocket.close(code=1000)
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        subscribers = VEO_JOB_SUBSCRIBERS.get(job_id)
+        if subscribers is not None:
+            subscribers.discard(queue)
+            if not subscribers:
+                VEO_JOB_SUBSCRIBERS.pop(job_id, None)
 
 
 @app.get("/health")

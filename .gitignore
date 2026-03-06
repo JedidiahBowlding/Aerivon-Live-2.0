@@ -53,3 +53,5 @@ vite.config.ts.timestamp-*
 artifacts/generated_images/
 tmp/
 temp/
+demo_video_output*/
+*.mp4

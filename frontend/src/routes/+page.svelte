@@ -6,6 +6,7 @@
 	import AgentTimeline from '../components/AgentTimeline.svelte';
 	import BrowserView from '../components/BrowserView.svelte';
 	import StoryStream from '../components/StoryStream.svelte';
+	import VideoGenerationPanel from '../components/VideoGenerationPanel.svelte';
 	import VoiceInput from '../components/VoiceInput.svelte';
 	import {
 		browserUrl,
@@ -46,6 +47,7 @@
 	let lastEventText = 'none';
 	let completedAt: number | null = null;
 	let storyText = '';
+	let videoPanel: { startFromVoiceRequest: (voiceText: string) => Promise<void> } | null = null;
 
 	$: steps = $timelineSteps;
 	$: plan = $plannerSteps;
@@ -63,6 +65,17 @@
 	$: completedAt = $runCompletedAt;
 	$: storyText = $latestStoryText;
 
+	function shouldTriggerVeoFromVoice(text: string): boolean {
+		const value = (text || '').toLowerCase();
+		if (!value) {
+			return false;
+		}
+		const hasVideoIntent = /\b(video|veo|cinematic|scene|render)\b/.test(value);
+		const hasIllustrationIntent = /\b(illustration|illustrate|image|artwork|art|draw)\b/.test(value);
+		const hasGenerateIntent = /\b(make|create|generate|render|produce|build)\b/.test(value);
+		return (hasVideoIntent || hasIllustrationIntent) && hasGenerateIntent;
+	}
+
 	function submitPrompt(event: CustomEvent<{ text: string }>): void {
 		const text = event.detail.text;
 		pushMessage({ type: 'action', action: `user:${text}`, ts: Date.now() });
@@ -75,6 +88,15 @@
 				ts: Date.now()
 			});
 		}
+
+		if (shouldTriggerVeoFromVoice(text) && videoPanel) {
+			pushMessage({
+				type: 'action',
+				action: 'veo_auto_triggered_from_voice',
+				ts: Date.now()
+			});
+			void videoPanel.startFromVoiceRequest(text);
+		}
 	}
 
 	function interruptRun(): void {
@@ -82,6 +104,20 @@
 		pushMessage({
 			type: 'action',
 			action: sent ? 'user_interrupt' : 'interrupt_not_sent',
+			ts: Date.now()
+		});
+	}
+
+	function handleVideoReady(event: CustomEvent<{ url: string }>): void {
+		const url = event.detail.url;
+		pushMessage({
+			type: 'action',
+			action: 'veo_video_ready',
+			ts: Date.now()
+		});
+		pushMessage({
+			type: 'video',
+			url,
 			ts: Date.now()
 		});
 	}
@@ -153,6 +189,10 @@
 
 	<section class="panel-stack mb-4">
 		<VoiceInput on:submit={submitPrompt} on:interrupt={interruptRun} />
+	</section>
+
+	<section class="panel-stack mb-4">
+		<VideoGenerationPanel bind:this={videoPanel} on:videoReady={handleVideoReady} />
 	</section>
 
 	<section class="panel-stack grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
