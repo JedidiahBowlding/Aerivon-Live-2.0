@@ -60,7 +60,7 @@ steps:
           --timeout 600 \
           --max-instances 3 \
           --min-instances 0 \
-          --set-env-vars "VITE_AERIVON_API_URL=${BACKEND_URL}" \
+          --set-env-vars "VITE_AERIVON_API_URL=$${BACKEND_URL},VITE_AERIVON_WS_URL=$${BACKEND_URL/https:\/\//wss:\/\/}/ws/story" \
           --quiet
 
 options:

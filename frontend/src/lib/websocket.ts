@@ -144,12 +144,20 @@ function wsUrl(): string {
     return envUrl;
   }
 
+  const apiUrl = (import.meta.env.VITE_AERIVON_API_URL as string | undefined)?.trim();
+  if (apiUrl) {
+    const wsBase = apiUrl.startsWith('https://')
+      ? apiUrl.replace('https://', 'wss://')
+      : apiUrl.replace('http://', 'ws://');
+    return `${wsBase.replace(/\/$/, '')}/ws/story`;
+  }
+
   if (!browser) {
-    return 'ws://localhost:8080/ws/aerivon';
+    return 'ws://localhost:8081/ws/story';
   }
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${location.hostname}:8080/ws/aerivon`;
+  return `${protocol}//${location.hostname}:8081/ws/story`;
 }
 
 export function connectAerivonSocket(): WebSocket | null {

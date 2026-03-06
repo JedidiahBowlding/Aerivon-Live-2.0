@@ -78,18 +78,19 @@
 
 	function submitPrompt(event: CustomEvent<{ text: string }>): void {
 		const text = event.detail.text;
+		const autoVeo = shouldTriggerVeoFromVoice(text) && !!videoPanel;
 		pushMessage({ type: 'action', action: `user:${text}`, ts: Date.now() });
 
 		const sent = sendSocketMessage({ type: 'prompt', text });
 		if (!sent) {
 			pushMessage({
 				type: 'action',
-				action: 'socket_not_ready',
+				action: autoVeo ? 'socket_not_ready_veo_fallback' : 'socket_not_ready',
 				ts: Date.now()
 			});
 		}
 
-		if (shouldTriggerVeoFromVoice(text) && videoPanel) {
+		if (autoVeo && videoPanel) {
 			pushMessage({
 				type: 'action',
 				action: 'veo_auto_triggered_from_voice',
