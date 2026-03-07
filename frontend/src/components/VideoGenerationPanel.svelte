@@ -51,6 +51,14 @@
     return wsBase;
   }
 
+  function normalizeWsUrl(url: string): string {
+    const trimmed = (url || '').trim();
+    if (browser && location.protocol === 'https:' && trimmed.startsWith('ws://')) {
+      return `wss://${trimmed.slice(5)}`;
+    }
+    return trimmed;
+  }
+
   function absolutizeVideoUrl(pathOrUrl: string): string {
     if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
       return pathOrUrl;
@@ -128,7 +136,7 @@
       jobId = job.job_id;
       handleStatusEvent(job);
 
-      const wsUrl = job.ws_url || `${wsBaseFromApi(apiBase())}/ws/veo/${job.job_id}`;
+      const wsUrl = normalizeWsUrl(job.ws_url || `${wsBaseFromApi(apiBase())}/ws/veo/${job.job_id}`);
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => addStatusLog('Connected to Veo status stream.');
