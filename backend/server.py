@@ -1210,7 +1210,7 @@ async def ws_story(websocket: WebSocket) -> None:
     - {"type": "text", "text": "...", "index": N}          <- narration chunk
     - {"type": "image", "data_b64": "...", "mime_type": "image/png", "index": N}
     - {"type": "audio", "data_b64": "...", "index": N}     <- TTS for preceding text
-    - {"type": "video", "data_b64": "...", "mime_type": "video/mp4", "index": N}
+    - {"type": "video", "url": "...", "index": N}
     - {"type": "error", "error": "..."}
     - {"type": "done"}
     """
@@ -1318,7 +1318,16 @@ async def ws_story(websocket: WebSocket) -> None:
             print(f"[STORY IMAGE] Error generating image: {e}", file=sys.stderr)
             return None
 
-    async def generate_video(prompt: str) -> bytes | None:
+    ws_url = str(websocket.url)
+    if ws_url.startswith("wss://"):
+        public_base_url = "https://" + ws_url[len("wss://") :]
+    elif ws_url.startswith("ws://"):
+        public_base_url = "http://" + ws_url[len("ws://") :]
+    else:
+        public_base_url = ws_url
+    public_base_url = public_base_url.split("/ws/story", 1)[0].rstrip("/")
+
+    async def generate_video(prompt: str) -> str | None:
         if not prompt or len(prompt) < 3:
             return None
 
@@ -1331,13 +1340,44 @@ async def ws_story(websocket: WebSocket) -> None:
                 "Create a cinematic short story scene with coherent action, smooth motion, and rich visuals. "
                 f"Scene brief: {prompt}"
             )
-            return await asyncio.to_thread(
-                _generate_veo_video_blocking,
-                prompt=scene_prompt,
-                model=model,
-                duration_seconds=duration_seconds,
-                aspect_ratio=aspect_ratio,
-            )
+
+            job_id = uuid4().hex[:12]
+            created_at = time.time()
+            VEO_JOBS[job_id] = {
+                "job_id": job_id,
+                "status": "queued",
+                "progress": 0,
+                "prompt": scene_prompt,
+                "model": model,
+                "duration_seconds": duration_seconds,
+                "aspect_ratio": aspect_ratio,
+                "video_url": None,
+                "error": None,
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+
+            # Reuse the same async Veo job pipeline as /veo/jobs for consistency.
+            await _run_veo_job(job_id)
+
+            job = VEO_JOBS.get(job_id)
+            if not job:
+                return None
+
+            if str(job.get("status") or "") != "completed":
+                err = str(job.get("error") or "unknown Veo error")
+                print(f"[STORY VIDEO] Veo job {job_id} failed: {err}", file=sys.stderr)
+                return None
+
+            video_path = str(job.get("video_url") or "").strip()
+            if not video_path:
+                return None
+
+            if video_path.startswith("http://") or video_path.startswith("https://"):
+                return video_path
+            if video_path.startswith("/"):
+                return f"{public_base_url}{video_path}"
+            return f"{public_base_url}/{video_path}"
         except Exception as e:
             print(f"[STORY VIDEO] Error generating video: {e}", file=sys.stderr)
             return None
@@ -1458,12 +1498,11 @@ async def ws_story(websocket: WebSocket) -> None:
                             "index": idx,
                         })
 
-                        video_bytes = await generate_video(scene_text or prompt)
-                        if video_bytes:
+                        video_url = await generate_video(scene_text or prompt)
+                        if video_url:
                             await send({
                                 "type": "video",
-                                "data_b64": base64.b64encode(video_bytes).decode("ascii"),
-                                "mime_type": "video/mp4",
+                                "url": video_url,
                                 "index": idx,
                             })
 
