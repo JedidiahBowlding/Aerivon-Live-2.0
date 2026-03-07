@@ -296,7 +296,7 @@ async def _run_veo_job(job_id: str) -> None:
     await _veo_publish(job_id, {"status": "running", "progress": 10})
 
     prompt = str(job.get("prompt") or "").strip()
-    model = str(job.get("model") or "veo-3.0-generate-001").strip()
+    model = str(job.get("model") or "veo-3.1-generate-001").strip()
     duration_seconds = int(job.get("duration_seconds") or 6)
     aspect_ratio = str(job.get("aspect_ratio") or "16:9")
 
@@ -1332,7 +1332,7 @@ async def ws_story(websocket: WebSocket) -> None:
             return None
 
         try:
-            model = os.getenv("AERIVON_VIDEO_MODEL", "veo-3.0-generate-001").strip() or "veo-3.0-generate-001"
+            model = os.getenv("AERIVON_VIDEO_MODEL", "veo-3.1-generate-001").strip() or "veo-3.1-generate-001"
             duration_seconds = max(4, min(8, int(os.getenv("AERIVON_VIDEO_DURATION_SECONDS", "5"))))
             aspect_ratio = os.getenv("AERIVON_VIDEO_ASPECT_RATIO", "16:9").strip() or "16:9"
 
@@ -1558,7 +1558,7 @@ class SpeakRequest(BaseModel):
 
 class VeoJobRequest(BaseModel):
     prompt: str = Field(min_length=8, max_length=5000)
-    model: str = Field(default_factory=lambda: os.getenv("AERIVON_VIDEO_MODEL", "veo-3.0-generate-001"))
+    model: str = Field(default_factory=lambda: os.getenv("AERIVON_VIDEO_MODEL", "veo-3.1-generate-001"))
     duration_seconds: int = Field(default=6, ge=4, le=20)
     aspect_ratio: str = Field(default="16:9")
 
@@ -1573,7 +1573,7 @@ async def create_veo_job(payload: VeoJobRequest, request: Request) -> dict[str, 
         "status": "queued",
         "progress": 0,
         "prompt": payload.prompt.strip(),
-        "model": payload.model.strip() or "veo-3.0-generate-001",
+        "model": payload.model.strip() or "veo-3.1-generate-001",
         "duration_seconds": int(payload.duration_seconds),
         "aspect_ratio": payload.aspect_ratio.strip() or "16:9",
         "video_url": None,

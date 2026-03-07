@@ -18,7 +18,7 @@
   const dispatch = createEventDispatcher<{ videoReady: VideoReadyEvent }>();
 
   let prompt = 'Create a cinematic 45-second product demo of Aerivon Live V2 showing voice interaction, planning, navigation, storytelling, and value outcome.';
-  let model = 'veo-3.0-generate-001';
+  let model = 'veo-3.1-generate-001';
   let durationSeconds = 6;
   let aspectRatio = '16:9';
 

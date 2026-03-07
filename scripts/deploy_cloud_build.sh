@@ -13,7 +13,7 @@ MEMORY_BUCKET="${MEMORY_BUCKET:-}"
 REGION="${REGION:-us-central1}"
 BACKEND_SERVICE="${BACKEND_SERVICE:-aerivon-live-agent}"
 FRONTEND_SERVICE="${FRONTEND_SERVICE:-aerivon-live-frontend}"
-VIDEO_MODEL="${VIDEO_MODEL:-veo-3.0-generate-001}"
+VIDEO_MODEL="${VIDEO_MODEL:-veo-3.1-generate-001}"
 
 if [[ -z "${PROJECT_ID}" || -z "${SERVICE_ACCOUNT}" || -z "${MEMORY_BUCKET}" ]]; then
   echo "Missing required env vars."

@@ -11,7 +11,7 @@ substitutions:
   _REGION: us-central1
   _BACKEND_SERVICE: aerivon-live-agent
   _FRONTEND_SERVICE: aerivon-live-frontend
-  _VIDEO_MODEL: veo-3.0-generate-001
+  _VIDEO_MODEL: veo-3.1-generate-001
 
 steps:
   # Deploy backend API (FastAPI + WS + Veo job endpoints)
@@ -60,8 +60,8 @@ steps:
           --timeout 600 \
           --max-instances 3 \
           --min-instances 0 \
-          --set-build-env-vars "VITE_AERIVON_API_URL=$${BACKEND_URL},VITE_AERIVON_WS_URL=$${BACKEND_URL/https:\/\//wss:\/\/}/ws/story" \
-          --set-env-vars "VITE_AERIVON_API_URL=$${BACKEND_URL},VITE_AERIVON_WS_URL=$${BACKEND_URL/https:\/\//wss:\/\/}/ws/story" \
+          --set-build-env-vars "VITE_AERIVON_API_URL=$${BACKEND_URL},VITE_AERIVON_WS_URL=$${BACKEND_URL/https:\/\//wss:\/\/}/ws/live" \
+          --set-env-vars "VITE_AERIVON_API_URL=$${BACKEND_URL},VITE_AERIVON_WS_URL=$${BACKEND_URL/https:\/\//wss:\/\/}/ws/live" \
           --quiet
 
 options:
