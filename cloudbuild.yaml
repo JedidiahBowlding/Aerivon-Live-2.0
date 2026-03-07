@@ -36,7 +36,7 @@ steps:
           --min-instances 0 \
           --execution-environment gen2 \
           --session-affinity \
-          --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=True,GOOGLE_CLOUD_PROJECT=${_PROJECT_ID},GOOGLE_CLOUD_LOCATION=${_REGION},AERIVON_MEMORY_BUCKET=${_MEMORY_BUCKET},AERIVON_VIDEO_MODEL=${_VIDEO_MODEL},AERIVON_LIVE_MAX_OUTPUT_TOKENS=2500,AERIVON_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,https://aerivon-live-frontend-oauob6cvnq-uc.a.run.app,AERIVON_CORS_ORIGIN_REGEX=^https://.*\.a\.run\.app$" \
+          --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=True,GOOGLE_CLOUD_PROJECT=${_PROJECT_ID},GOOGLE_CLOUD_LOCATION=${_REGION},AERIVON_MEMORY_BUCKET=${_MEMORY_BUCKET},AERIVON_VIDEO_MODEL=${_VIDEO_MODEL},AERIVON_LIVE_MAX_OUTPUT_TOKENS=2500" \
           --quiet
 
   # Resolve backend URL and deploy frontend with API endpoint baked as env var
