@@ -46,6 +46,13 @@ export type AerivonSocketMessage =
 let ws: WebSocket | null = null;
 let planCursor = -1;
 
+function forceSecureWs(url: string): string {
+  if (browser && location.protocol === 'https:' && url.startsWith('ws://')) {
+    return `wss://${url.slice(5)}`;
+  }
+  return url;
+}
+
 function toStatusCardDataUrl(action: string): string {
   const safe = action.replace(/&/g, 'and').replace(/</g, '').replace(/>/g, '');
   const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='1280' height='720' viewBox='0 0 1280 720'>
@@ -141,7 +148,7 @@ function advanceExecutingStep(action: string): void {
 function wsUrl(): string {
   const envUrl = (import.meta.env.VITE_AERIVON_WS_URL as string | undefined)?.trim();
   if (envUrl) {
-    return envUrl;
+    return forceSecureWs(envUrl);
   }
 
   const apiUrl = (import.meta.env.VITE_AERIVON_API_URL as string | undefined)?.trim();
@@ -149,15 +156,15 @@ function wsUrl(): string {
     const wsBase = apiUrl.startsWith('https://')
       ? apiUrl.replace('https://', 'wss://')
       : apiUrl.replace('http://', 'ws://');
-    return `${wsBase.replace(/\/$/, '')}/ws/story`;
+    return forceSecureWs(`${wsBase.replace(/\/$/, '')}/ws/story`);
   }
 
   if (!browser) {
-    return 'ws://localhost:8081/ws/story';
+    return forceSecureWs('ws://localhost:8081/ws/story');
   }
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${location.hostname}:8081/ws/story`;
+  return forceSecureWs(`${protocol}//${location.hostname}:8081/ws/story`);
 }
 
 export function connectAerivonSocket(): WebSocket | null {

@@ -44,7 +44,11 @@
   }
 
   function wsBaseFromApi(base: string): string {
-    return base.startsWith('https://') ? base.replace('https://', 'wss://') : base.replace('http://', 'ws://');
+    const wsBase = base.startsWith('https://') ? base.replace('https://', 'wss://') : base.replace('http://', 'ws://');
+    if (browser && location.protocol === 'https:' && wsBase.startsWith('ws://')) {
+      return `wss://${wsBase.slice(5)}`;
+    }
+    return wsBase;
   }
 
   function absolutizeVideoUrl(pathOrUrl: string): string {
