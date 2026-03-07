@@ -29,6 +29,7 @@
   type SpeechCtor = new () => SpeechRecognitionLike;
 
   let prompt = '';
+  let pendingPrompt = '';
   let listening = false;
   let micError = '';
 
@@ -286,14 +287,10 @@
       clearSilenceTimer();
 
       if (shouldSubmit && finalTranscript.trim()) {
-        dispatch('submit', { text: finalTranscript.trim() });
-        pushStep('Planning');
-        prompt = '';
+        queuePromptForConfirmation(finalTranscript);
       } else if (shouldSubmit && prompt.trim()) {
         // Fallback when the recognizer delivered interim text but no final segment.
-        dispatch('submit', { text: prompt.trim() });
-        pushStep('Planning');
-        prompt = '';
+        queuePromptForConfirmation(prompt);
       }
 
       finalTranscript = '';
@@ -305,6 +302,11 @@
   async function startListening(): Promise<void> {
     micError = '';
     finalTranscript = '';
+
+    if (pendingPrompt.trim()) {
+      micError = 'Review and confirm, edit, or cancel the pending prompt first.';
+      return;
+    }
 
     if (assistantSpeaking) {
       stopAssistantVoice(true);
@@ -359,9 +361,7 @@
     if (!text) {
       return;
     }
-    dispatch('submit', { text });
-    prompt = '';
-    pushStep('Planning');
+    queuePromptForConfirmation(text);
   }
 
   function manualInterrupt(): void {
@@ -369,6 +369,38 @@
     if (listening) {
       stopListening();
     }
+  }
+
+  function queuePromptForConfirmation(text: string): void {
+    const normalized = text.trim();
+    if (!normalized) {
+      return;
+    }
+    pendingPrompt = normalized;
+    prompt = normalized;
+  }
+
+  function confirmPrompt(): void {
+    const text = pendingPrompt.trim();
+    if (!text) {
+      return;
+    }
+    dispatch('submit', { text });
+    pushStep('Planning');
+    pendingPrompt = '';
+    prompt = '';
+  }
+
+  function editPrompt(): void {
+    if (!pendingPrompt.trim()) {
+      return;
+    }
+    prompt = pendingPrompt;
+    pendingPrompt = '';
+  }
+
+  function cancelPrompt(): void {
+    pendingPrompt = '';
   }
 
   $: if (autoReadStory) {
@@ -394,7 +426,7 @@
 <div class="glass-panel p-3 md:p-4">
   <div class="mb-2 flex items-center justify-between">
     <p class="panel-title text-xs uppercase tracking-[0.18em] text-cyan-200/80">Voice Input</p>
-    <p class="text-xs text-cyan-100/70">Natural mode: pause to send, barge-in to interrupt</p>
+    <p class="text-xs text-cyan-100/70">Natural mode: pause to draft, then confirm before send</p>
   </div>
 
   <div class="mb-3 flex flex-wrap items-center gap-3 text-xs text-cyan-100/80">
@@ -420,6 +452,7 @@
       class="w-full rounded-xl border border-cyan-300/30 bg-slate-950/70 px-4 py-3 text-sm text-cyan-50 outline-none transition focus:border-cyan-300"
       placeholder="Say or type: Open nike.com and turn it into a cyberpunk story"
       bind:value={prompt}
+      spellcheck="true"
       on:keydown={(e) => e.key === 'Enter' && submitPrompt()}
     />
 
@@ -447,4 +480,32 @@
       Interrupt
     </button>
   </div>
+
+  {#if pendingPrompt}
+    <div class="mt-3 rounded-xl border border-amber-300/40 bg-amber-300/10 p-3">
+      <p class="text-xs uppercase tracking-[0.15em] text-amber-200/90">Agent Confirmation</p>
+      <p class="mt-1 text-xs text-amber-100/90">I heard this prompt. Do you want me to send it exactly as written?</p>
+      <p class="mt-2 text-sm text-amber-100">{pendingPrompt}</p>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button
+          class="rounded-lg border border-emerald-300/45 px-3 py-2 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-300/15"
+          on:click={confirmPrompt}
+        >
+          Yes, Send It
+        </button>
+        <button
+          class="rounded-lg border border-cyan-300/45 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20"
+          on:click={editPrompt}
+        >
+          No, Let Me Edit
+        </button>
+        <button
+          class="rounded-lg border border-rose-300/45 px-3 py-2 text-xs font-semibold text-rose-200 transition hover:bg-rose-300/15"
+          on:click={cancelPrompt}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
