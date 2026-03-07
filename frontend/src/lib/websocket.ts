@@ -32,6 +32,7 @@ const ACTION_TO_TIMELINE: Record<string, TimelineState> = {
 
 export type AerivonSocketMessage =
   | { type: 'text'; text: string }
+  | { type: 'transcript'; text: string; finished?: boolean }
   | { type: 'image'; url?: string; data_b64?: string; mime_type?: string }
   | { type: 'audio'; url?: string; data_b64?: string; mime_type?: string }
   | { type: 'video'; url?: string; data_b64?: string; mime_type?: string }
@@ -146,9 +147,19 @@ function advanceExecutingStep(action: string): void {
 }
 
 function wsUrl(): string {
+  const ensureLivePath = (url: string): string => {
+    if (url.includes('/ws/live')) {
+      return url;
+    }
+    if (url.includes('/ws/story')) {
+      return url.replace('/ws/story', '/ws/live');
+    }
+    return `${url.replace(/\/$/, '')}/ws/live`;
+  };
+
   const envUrl = (import.meta.env.VITE_AERIVON_WS_URL as string | undefined)?.trim();
   if (envUrl) {
-    return forceSecureWs(envUrl);
+    return forceSecureWs(ensureLivePath(envUrl));
   }
 
   const apiUrl = (import.meta.env.VITE_AERIVON_API_URL as string | undefined)?.trim();
@@ -156,15 +167,15 @@ function wsUrl(): string {
     const wsBase = apiUrl.startsWith('https://')
       ? apiUrl.replace('https://', 'wss://')
       : apiUrl.replace('http://', 'ws://');
-    return forceSecureWs(`${wsBase.replace(/\/$/, '')}/ws/story`);
+    return forceSecureWs(`${wsBase.replace(/\/$/, '')}/ws/live`);
   }
 
   if (!browser) {
-    return forceSecureWs('ws://localhost:8081/ws/story');
+    return forceSecureWs('ws://localhost:8081/ws/live');
   }
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return forceSecureWs(`${protocol}//${location.hostname}:8081/ws/story`);
+  return forceSecureWs(`${protocol}//${location.hostname}:8081/ws/live`);
 }
 
 function mediaDataUrl(dataB64: string | undefined, mimeType: string): string | null {
@@ -280,7 +291,7 @@ export function connectAerivonSocket(): WebSocket | null {
     }
 
     if (data.type === 'audio') {
-      const mime = (typeof data.mime_type === 'string' && data.mime_type.trim()) ? data.mime_type.trim() : 'audio/wav';
+      const mime = (typeof data.mime_type === 'string' && data.mime_type.trim()) ? data.mime_type.trim() : 'audio/pcm';
       const resolvedUrl =
         (typeof data.url === 'string' && data.url.trim())
           ? data.url.trim()
@@ -315,6 +326,15 @@ export function connectAerivonSocket(): WebSocket | null {
       }
     }
 
+    if (data.type === 'transcript' && typeof data.text === 'string') {
+      const text = data.text.trim();
+      if (text) {
+        setLatestStoryText(text);
+        pushMessage({ type: 'text', text, ts });
+      }
+      return;
+    }
+
     pushMessage({ ...(data as StreamMessage), ts });
   };
 
@@ -336,6 +356,19 @@ export function sendSocketMessage(payload: object): boolean {
   }
   resetRunVisuals();
   markPromptSent();
+  // Backward compatibility: callers may still send {type:'prompt', text:'...'}.
+  if (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'type' in payload &&
+    'text' in payload &&
+    (payload as { type?: string }).type === 'prompt'
+  ) {
+    const legacy = payload as { text?: string };
+    ws.send(JSON.stringify({ type: 'text', text: legacy.text ?? '' }));
+    return true;
+  }
+
   ws.send(JSON.stringify(payload));
   return true;
 }

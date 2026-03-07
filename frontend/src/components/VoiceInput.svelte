@@ -123,9 +123,10 @@
     const floats = new Float32Array(sampleCount);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
-    // Gemini returns L16 PCM. L16 is big-endian by convention.
+    // Gemini WS streams PCM s16le; keep big-endian as fallback for L16 payloads.
+    const isLittleEndian = (mimeType || '').toLowerCase().includes('pcm');
     for (let i = 0; i < sampleCount; i += 1) {
-      const sample = view.getInt16(i * 2, false);
+      const sample = view.getInt16(i * 2, isLittleEndian);
       floats[i] = sample / 32768;
     }
 
@@ -173,7 +174,7 @@
     }
 
     const normalizedMime = (mimeType || '').toLowerCase();
-    if (normalizedMime.includes('audio/l16')) {
+    if (normalizedMime.includes('audio/l16') || normalizedMime.includes('audio/pcm')) {
       void playPcmL16DataUrl(url, mimeType).catch(() => {
         micError = 'Gemini audio decode failed. Please try again.';
         assistantSpeaking = false;
@@ -264,7 +265,7 @@
             stoppingIntentional = true;
             recognition.stop();
           }
-        }, 1200);
+        }, 1800);
       }
     };
 
@@ -286,6 +287,11 @@
 
       if (shouldSubmit && finalTranscript.trim()) {
         dispatch('submit', { text: finalTranscript.trim() });
+        pushStep('Planning');
+        prompt = '';
+      } else if (shouldSubmit && prompt.trim()) {
+        // Fallback when the recognizer delivered interim text but no final segment.
+        dispatch('submit', { text: prompt.trim() });
         pushStep('Planning');
         prompt = '';
       }
