@@ -207,7 +207,7 @@
           bind:value={durationSeconds}
           type="number"
           min="4"
-          max="20"
+          max="60"
           class="mt-1 w-full rounded-md border border-cyan-300/25 bg-slate-950/55 px-2 py-1.5 text-sm text-cyan-50 outline-none focus:border-cyan-300/60"
         />
       </label>

@@ -272,8 +272,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    if args.duration_seconds <= 0 or args.duration_seconds > 30:
-        raise ValueError("--duration-seconds must be between 1 and 30.")
+    if args.duration_seconds <= 0 or args.duration_seconds > 60:
+        raise ValueError("--duration-seconds must be between 1 and 60.")
 
     selected_scenes = SCENES[: max(1, min(args.max_scenes, len(SCENES)))]
     total_duration = args.duration_seconds * len(selected_scenes)

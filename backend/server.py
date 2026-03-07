@@ -1333,7 +1333,7 @@ async def ws_story(websocket: WebSocket) -> None:
 
         try:
             model = os.getenv("AERIVON_VIDEO_MODEL", "veo-3.1-generate-001").strip() or "veo-3.1-generate-001"
-            duration_seconds = max(4, min(8, int(os.getenv("AERIVON_VIDEO_DURATION_SECONDS", "5"))))
+            duration_seconds = max(4, min(60, int(os.getenv("AERIVON_VIDEO_DURATION_SECONDS", "5"))))
             aspect_ratio = os.getenv("AERIVON_VIDEO_ASPECT_RATIO", "16:9").strip() or "16:9"
 
             scene_prompt = (
@@ -1559,7 +1559,7 @@ class SpeakRequest(BaseModel):
 class VeoJobRequest(BaseModel):
     prompt: str = Field(min_length=8, max_length=5000)
     model: str = Field(default_factory=lambda: os.getenv("AERIVON_VIDEO_MODEL", "veo-3.1-generate-001"))
-    duration_seconds: int = Field(default=6, ge=4, le=20)
+    duration_seconds: int = Field(default=6, ge=4, le=60)
     aspect_ratio: str = Field(default="16:9")
 
 
