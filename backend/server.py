@@ -91,6 +91,10 @@ app = FastAPI(title="Aerivon Live Agent API")
 
 # CORS: allow the demo frontend (served on a different port) to call the backend.
 _cors_origins_env = (os.getenv("AERIVON_CORS_ORIGINS") or "").strip()
+_cors_origin_regex = (
+    os.getenv("AERIVON_CORS_ORIGIN_REGEX")
+    or r"^https://.*\.a\.run\.app$"
+).strip()
 if _cors_origins_env:
     cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
 else:
@@ -102,6 +106,7 @@ else:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
