@@ -32,9 +32,9 @@ const ACTION_TO_TIMELINE: Record<string, TimelineState> = {
 
 export type AerivonSocketMessage =
   | { type: 'text'; text: string }
-  | { type: 'image'; url: string }
-  | { type: 'audio'; url: string; mime_type?: string }
-  | { type: 'video'; url: string }
+  | { type: 'image'; url?: string; data_b64?: string; mime_type?: string }
+  | { type: 'audio'; url?: string; data_b64?: string; mime_type?: string }
+  | { type: 'video'; url?: string; data_b64?: string; mime_type?: string }
   | { type: 'action'; action: string }
   | { type: 'browser'; screenshot: string | null; url?: string }
   | {
@@ -167,6 +167,13 @@ function wsUrl(): string {
   return forceSecureWs(`${protocol}//${location.hostname}:8081/ws/story`);
 }
 
+function mediaDataUrl(dataB64: string | undefined, mimeType: string): string | null {
+  if (typeof dataB64 !== 'string' || !dataB64.trim()) {
+    return null;
+  }
+  return `data:${mimeType};base64,${dataB64.trim()}`;
+}
+
 export function connectAerivonSocket(): WebSocket | null {
   if (!browser) {
     return null;
@@ -252,13 +259,53 @@ export function connectAerivonSocket(): WebSocket | null {
       return;
     }
 
-    if (data.type === 'image' && typeof data.url === 'string' && data.url.trim()) {
+    if (data.type === 'image') {
+      const resolvedUrl =
+        (typeof data.url === 'string' && data.url.trim())
+          ? data.url.trim()
+          : mediaDataUrl(data.data_b64, data.mime_type || 'image/png');
+
+      if (!resolvedUrl) {
+        return;
+      }
+
       appendLiveVisualFrame({
         type: 'illustration',
-        url: data.url.trim(),
+        url: resolvedUrl,
         ts,
         label: 'story illustration'
       });
+      pushMessage({ type: 'image', url: resolvedUrl, ts });
+      return;
+    }
+
+    if (data.type === 'audio') {
+      const mime = (typeof data.mime_type === 'string' && data.mime_type.trim()) ? data.mime_type.trim() : 'audio/wav';
+      const resolvedUrl =
+        (typeof data.url === 'string' && data.url.trim())
+          ? data.url.trim()
+          : mediaDataUrl(data.data_b64, mime);
+
+      if (!resolvedUrl) {
+        return;
+      }
+
+      pushMessage({ type: 'audio', url: resolvedUrl, mime_type: mime, ts });
+      return;
+    }
+
+    if (data.type === 'video') {
+      const resolvedUrl =
+        (typeof data.url === 'string' && data.url.trim())
+          ? data.url.trim()
+          : mediaDataUrl(data.data_b64, data.mime_type || 'video/mp4');
+
+      if (!resolvedUrl) {
+        return;
+      }
+
+      pushMessage({ type: 'video', url: resolvedUrl, ts });
+      return;
     }
 
     if (data.type === 'text' && typeof data.text === 'string') {

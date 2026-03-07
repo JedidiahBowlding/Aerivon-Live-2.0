@@ -1210,6 +1210,7 @@ async def ws_story(websocket: WebSocket) -> None:
     - {"type": "text", "text": "...", "index": N}          <- narration chunk
     - {"type": "image", "data_b64": "...", "mime_type": "image/png", "index": N}
     - {"type": "audio", "data_b64": "...", "index": N}     <- TTS for preceding text
+    - {"type": "video", "data_b64": "...", "mime_type": "video/mp4", "index": N}
     - {"type": "error", "error": "..."}
     - {"type": "done"}
     """
@@ -1317,6 +1318,30 @@ async def ws_story(websocket: WebSocket) -> None:
             print(f"[STORY IMAGE] Error generating image: {e}", file=sys.stderr)
             return None
 
+    async def generate_video(prompt: str) -> bytes | None:
+        if not prompt or len(prompt) < 3:
+            return None
+
+        try:
+            model = os.getenv("AERIVON_VIDEO_MODEL", "veo-3.0-generate-001").strip() or "veo-3.0-generate-001"
+            duration_seconds = max(4, min(8, int(os.getenv("AERIVON_VIDEO_DURATION_SECONDS", "5"))))
+            aspect_ratio = os.getenv("AERIVON_VIDEO_ASPECT_RATIO", "16:9").strip() or "16:9"
+
+            scene_prompt = (
+                "Create a cinematic short story scene with coherent action, smooth motion, and rich visuals. "
+                f"Scene brief: {prompt}"
+            )
+            return await asyncio.to_thread(
+                _generate_veo_video_blocking,
+                prompt=scene_prompt,
+                model=model,
+                duration_seconds=duration_seconds,
+                aspect_ratio=aspect_ratio,
+            )
+        except Exception as e:
+            print(f"[STORY VIDEO] Error generating video: {e}", file=sys.stderr)
+            return None
+
     await send({"type": "status", "status": "connected", "model": "gemini-2.5-flash-image-preview"})
 
     try:
@@ -1411,9 +1436,11 @@ async def ws_story(websocket: WebSocket) -> None:
                         await send({"type": "text", "text": text, "index": idx})
 
                     elif part["kind"] == "image":
+                        scene_text = pending_text.strip()
+
                         # Narrate accumulated text before this image using Gemini Live
-                        if pending_text.strip():
-                            audio_bytes = await live_narrate(pending_text)
+                        if scene_text:
+                            audio_bytes = await live_narrate(scene_text)
                             if audio_bytes:
                                 await send({
                                     "type": "audio",
@@ -1430,6 +1457,15 @@ async def ws_story(websocket: WebSocket) -> None:
                             "mime_type": part["mime_type"],
                             "index": idx,
                         })
+
+                        video_bytes = await generate_video(scene_text or prompt)
+                        if video_bytes:
+                            await send({
+                                "type": "video",
+                                "data_b64": base64.b64encode(video_bytes).decode("ascii"),
+                                "mime_type": "video/mp4",
+                                "index": idx,
+                            })
 
                 # Narrate any trailing text after last image
                 if pending_text.strip() and not cancel_flag:
