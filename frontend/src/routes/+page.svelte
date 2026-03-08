@@ -170,6 +170,10 @@
 <main class="relative z-10 mx-auto min-h-screen w-full max-w-[1450px] px-4 pb-6 pt-6 md:px-8 md:pt-8">
 	<section class="mb-5 grid gap-4 md:grid-cols-[1.1fr_auto] md:items-end">
 		<div>
+			<div class="mb-3 inline-flex items-center gap-3 rounded-xl border border-cyan-300/25 bg-slate-950/50 px-3 py-2">
+				<img src="/branding/logo.png" alt="Aerivon logo" class="h-8 w-8 object-contain" />
+				<span class="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-100/85">Aerivon</span>
+			</div>
 			<p class="neon-label mb-2 text-xs uppercase tracking-[0.22em]">Aerivon Multimodal Runtime</p>
 			<h1 class="hero-title text-3xl font-bold leading-tight text-cyan-50 md:text-5xl">
 				Voice-driven creative operating system
