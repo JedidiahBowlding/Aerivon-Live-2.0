@@ -70,10 +70,17 @@
 		if (!value) {
 			return false;
 		}
-		const hasVideoIntent = /\b(video|veo|cinematic|scene|render)\b/.test(value);
-		const hasIllustrationIntent = /\b(illustration|illustrate|image|artwork|art|draw)\b/.test(value);
-		const hasGenerateIntent = /\b(make|create|generate|render|produce|build)\b/.test(value);
-		return (hasVideoIntent || hasIllustrationIntent) && hasGenerateIntent;
+		const hasVideoCue = /\b(video|veo|cinematic|scene|trailer|clip|short|animation|film)\b/.test(value);
+		const hasImageCue = /\b(illustration|illustrate|image|artwork|art|draw|poster)\b/.test(value);
+		const hasCreationCue = /\b(make|create|generate|render|produce|build|craft|design|show)\b/.test(value);
+		const hasRequestCue = /\b(want|need|please|can you|could you|let's|lets)\b/.test(value);
+
+		if (!(hasVideoCue || hasImageCue)) {
+			return false;
+		}
+
+		// Trigger if the user clearly asks for media creation, even when wording is conversational.
+		return hasCreationCue || hasRequestCue;
 	}
 
 	function submitPrompt(event: CustomEvent<{ text: string }>): void {
@@ -97,6 +104,12 @@
 				ts: Date.now()
 			});
 			void videoPanel.startFromVoiceRequest(text);
+		} else if (!autoVeo) {
+			pushMessage({
+				type: 'action',
+				action: 'veo_auto_not_triggered',
+				ts: Date.now()
+			});
 		}
 	}
 

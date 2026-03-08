@@ -52,6 +52,15 @@ export type AerivonSocketMessage =
 let ws: WebSocket | null = null;
 let planCursor = -1;
 let currentAudioSampleRate = 24000;
+let liveTurnStreaming = false;
+
+function markLiveTurnProgress(ts: number, channel: string): void {
+  if (liveTurnStreaming) {
+    return;
+  }
+  liveTurnStreaming = true;
+  pushMessage({ type: 'action', action: `progress:responding:${channel}`, ts });
+}
 
 function forceSecureWs(url: string): string {
   if (browser && location.protocol === 'https:' && url.startsWith('ws://')) {
@@ -300,7 +309,9 @@ export function connectAerivonSocket(): WebSocket | null {
     }
 
     if (data.type === 'turn_complete') {
+      liveTurnStreaming = false;
       markRunCompleted(ts);
+      pushMessage({ type: 'action', action: 'progress:completed', ts });
       pushMessage({ type: 'action', action: 'turn_complete', ts });
       return;
     }
@@ -365,6 +376,7 @@ export function connectAerivonSocket(): WebSocket | null {
         return;
       }
 
+      markLiveTurnProgress(ts, 'audio');
       pushMessage({ type: 'audio', url: resolvedUrl, mime_type: mime, ts });
       return;
     }
@@ -386,6 +398,7 @@ export function connectAerivonSocket(): WebSocket | null {
     if (data.type === 'text' && typeof data.text === 'string') {
       const text = data.text.trim();
       if (text && !text.toLowerCase().startsWith('navigator:') && !text.toLowerCase().startsWith('interrupt ack:')) {
+        markLiveTurnProgress(ts, 'text');
         setLatestStoryText(text);
       }
     }
@@ -393,6 +406,7 @@ export function connectAerivonSocket(): WebSocket | null {
     if (data.type === 'transcript' && typeof data.text === 'string') {
       const text = data.text.trim();
       if (text) {
+        markLiveTurnProgress(ts, 'transcript');
         setLatestStoryText(text);
         pushMessage({ type: 'text', text, ts });
       }
@@ -421,6 +435,7 @@ export function sendSocketMessage(payload: object): boolean {
   }
   resetRunVisuals();
   markPromptSent();
+  liveTurnStreaming = false;
   // Backward compatibility: callers may still send {type:'prompt', text:'...'}.
   if (
     typeof payload === 'object' &&
