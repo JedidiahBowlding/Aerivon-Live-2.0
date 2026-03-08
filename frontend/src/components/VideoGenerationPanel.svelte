@@ -12,6 +12,8 @@
     status: string;
     progress?: number;
     video_url?: string | null;
+    preview_video_url?: string | null;
+    fast_preview?: boolean;
     error?: string | null;
   };
 
@@ -29,6 +31,7 @@
   let progress = 0;
   let errorMessage = '';
   let finalVideoUrl: string | null = null;
+  let previewVideoUrl: string | null = null;
   let statusLog: string[] = [];
 
   let ws: WebSocket | null = null;
@@ -92,6 +95,14 @@
 
     addStatusLog(`Status: ${status} (${progress}%)`);
 
+    if (payload.preview_video_url) {
+      const nextPreviewUrl = absolutizeVideoUrl(payload.preview_video_url);
+      if (nextPreviewUrl !== previewVideoUrl) {
+        previewVideoUrl = nextPreviewUrl;
+        addStatusLog('Preview video ready.');
+      }
+    }
+
     if (payload.video_url && payload.status === 'completed') {
       finalVideoUrl = absolutizeVideoUrl(payload.video_url);
       dispatch('videoReady', { url: finalVideoUrl });
@@ -107,6 +118,7 @@
 
     errorMessage = '';
     finalVideoUrl = null;
+    previewVideoUrl = null;
     statusLog = [];
     status = 'submitting';
     progress = 0;
@@ -128,7 +140,8 @@
           prompt,
           model,
           duration_seconds: normalizedDuration,
-          aspect_ratio: aspectRatio
+          aspect_ratio: aspectRatio,
+          fast_preview: true
         })
       });
 
@@ -248,6 +261,15 @@
           <track kind="captions" />
         </video>
         <a class="mt-2 inline-block text-xs text-emerald-200 underline" href={finalVideoUrl} target="_blank" rel="noopener noreferrer">Open video in new tab</a>
+      </div>
+    {/if}
+
+    {#if previewVideoUrl && !finalVideoUrl}
+      <div class="rounded-xl border border-amber-300/35 bg-amber-400/10 p-3">
+        <div class="mb-2 text-xs uppercase tracking-wide text-amber-200">Preview Video (Fast)</div>
+        <video controls class="w-full rounded-md" src={previewVideoUrl}>
+          <track kind="captions" />
+        </video>
       </div>
     {/if}
 

@@ -147,6 +147,19 @@ VEO_JOBS: dict[str, dict[str, Any]] = {}
 VEO_JOB_SUBSCRIBERS: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
 
 
+def _base_live_system_instruction() -> str:
+    return (
+        "You are Aerivon Live. Be concise, proactive, and helpful.\n\n"
+        "Core capabilities:\n"
+        "- Real-time voice conversation with interruption handling.\n"
+        "- Website navigation and visual page understanding through Aerivon's browser workflows.\n"
+        "- Multimodal creation support (text, image, and video workflows).\n"
+        "- Clear summaries and guidance based on observed web/screenshots.\n\n"
+        "If a user asks what you can do, explicitly mention website navigation and visual analysis. "
+        "When a web task is requested, ask for or confirm the target URL and proceed."
+    )
+
+
 def _get_api_key() -> str | None:
     for name in API_KEY_ENV_VARS:
         val = (os.getenv(name) or "").strip()
@@ -480,6 +493,8 @@ def _veo_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
         "duration_seconds": job.get("duration_seconds", 0),
         "aspect_ratio": job.get("aspect_ratio", "16:9"),
         "video_url": job.get("video_url"),
+        "preview_video_url": job.get("preview_video_url"),
+        "fast_preview": bool(job.get("fast_preview", False)),
         "error": job.get("error"),
         "updated_at": job.get("updated_at"),
     }
@@ -493,7 +508,7 @@ async def _veo_publish(job_id: str, payload: dict[str, Any]) -> None:
     job = VEO_JOBS.get(job_id)
     if job is not None:
         job["updated_at"] = payload["updated_at"]
-        for key in ("status", "progress", "video_url", "error"):
+        for key in ("status", "progress", "video_url", "preview_video_url", "error"):
             if key in payload:
                 job[key] = payload[key]
 
@@ -517,24 +532,53 @@ async def _run_veo_job(job_id: str) -> None:
     requested_duration = max(4, min(60, int(job.get("duration_seconds") or 6)))
     segment_durations = _split_veo_duration(requested_duration)
     aspect_ratio = str(job.get("aspect_ratio") or "16:9")
+    fast_preview = bool(job.get("fast_preview", False))
     job["duration_seconds"] = requested_duration
 
     try:
         segment_bytes: list[bytes] = []
-        total_segments = max(1, len(segment_durations))
-        for idx, seg_duration in enumerate(segment_durations, start=1):
-            progress = 20 + int(((idx - 1) / total_segments) * 55)
+        preview_bytes: bytes | None = None
+        preview_duration: int | None = None
+        preview_path = VEO_JOB_OUTPUT_DIR / f"{job_id}_preview.mp4"
+
+        if fast_preview:
+            preview_duration = _normalize_veo_clip_duration(min(requested_duration, 8))
+            await _veo_publish(job_id, {"status": "running", "progress": 15})
+            preview_prompt = (
+                f"{prompt}\n"
+                "Create a high-quality preview clip that captures the visual tone and subject of the final video."
+            )
+            preview_bytes = await asyncio.to_thread(
+                _generate_veo_video_blocking,
+                prompt=preview_prompt,
+                model=model,
+                duration_seconds=preview_duration,
+                aspect_ratio=aspect_ratio,
+            )
+            preview_path.write_bytes(preview_bytes)
             await _veo_publish(
                 job_id,
                 {
                     "status": "running",
-                    "progress": progress,
+                    "progress": 25,
+                    "preview_video_url": f"/veo/jobs/{job_id}/preview",
                 },
             )
-            clip_prompt = (
-                f"{prompt}\n"
-                f"This is segment {idx} of {total_segments}. Keep continuity with previous segments."
-            )
+
+        total_segments = max(1, len(segment_durations))
+
+        # Reuse preview when it already matches the final request shape.
+        if (
+            preview_bytes is not None
+            and preview_duration is not None
+            and total_segments == 1
+            and segment_durations[0] == preview_duration
+        ):
+            segment_bytes = [preview_bytes]
+        elif total_segments == 1:
+            seg_duration = segment_durations[0]
+            await _veo_publish(job_id, {"status": "running", "progress": 35})
+            clip_prompt = f"{prompt}\nThis is segment 1 of 1."
             clip = await asyncio.to_thread(
                 _generate_veo_video_blocking,
                 prompt=clip_prompt,
@@ -542,7 +586,47 @@ async def _run_veo_job(job_id: str) -> None:
                 duration_seconds=seg_duration,
                 aspect_ratio=aspect_ratio,
             )
-            segment_bytes.append(clip)
+            segment_bytes = [clip]
+        else:
+            parallelism = max(1, min(6, int(os.getenv("AERIVON_VEO_PARALLELISM", "3"))))
+            semaphore = asyncio.Semaphore(parallelism)
+            segment_map: dict[int, bytes] = {}
+
+            async def generate_segment(idx: int, seg_duration: int) -> tuple[int, bytes]:
+                clip_prompt = (
+                    f"{prompt}\n"
+                    f"This is segment {idx} of {total_segments}. Keep continuity with previous segments."
+                )
+                async with semaphore:
+                    clip = await asyncio.to_thread(
+                        _generate_veo_video_blocking,
+                        prompt=clip_prompt,
+                        model=model,
+                        duration_seconds=seg_duration,
+                        aspect_ratio=aspect_ratio,
+                    )
+                return idx, clip
+
+            tasks = [
+                asyncio.create_task(generate_segment(idx, seg_duration))
+                for idx, seg_duration in enumerate(segment_durations, start=1)
+            ]
+
+            completed = 0
+            try:
+                for done in asyncio.as_completed(tasks):
+                    idx, clip = await done
+                    segment_map[idx] = clip
+                    completed += 1
+                    progress = 30 + int((completed / total_segments) * 45)
+                    await _veo_publish(job_id, {"status": "running", "progress": min(progress, 75)})
+            except Exception:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                raise
+
+            segment_bytes = [segment_map[idx] for idx in range(1, total_segments + 1)]
 
         out_path = VEO_JOB_OUTPUT_DIR / f"{job_id}.mp4"
         if len(segment_bytes) == 1:
@@ -564,6 +648,7 @@ async def _run_veo_job(job_id: str) -> None:
                 "status": "completed",
                 "progress": 100,
                 "video_url": f"/veo/jobs/{job_id}/video",
+                "preview_video_url": f"/veo/jobs/{job_id}/preview" if fast_preview and preview_path.exists() else None,
             },
         )
     except Exception as exc:
@@ -1806,6 +1891,7 @@ class VeoJobRequest(BaseModel):
     model: str = Field(default_factory=lambda: os.getenv("AERIVON_VIDEO_MODEL", "veo-3.1-generate-001"))
     duration_seconds: int = Field(default=30, ge=4, le=60)
     aspect_ratio: str = Field(default="16:9")
+    fast_preview: bool = Field(default=False)
 
 
 @app.post("/veo/jobs")
@@ -1824,6 +1910,8 @@ async def create_veo_job(payload: VeoJobRequest, request: Request) -> dict[str, 
         "duration_seconds": duration_seconds,
         "aspect_ratio": payload.aspect_ratio.strip() or "16:9",
         "video_url": None,
+        "preview_video_url": None,
+        "fast_preview": bool(payload.fast_preview),
         "error": None,
         "created_at": created_at,
         "updated_at": created_at,
@@ -1867,6 +1955,19 @@ async def get_veo_job_video(job_id: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Video file missing")
 
     return FileResponse(path, media_type="video/mp4", filename=f"aerivon_{job_id}.mp4")
+
+
+@app.get("/veo/jobs/{job_id}/preview")
+async def get_veo_job_preview(job_id: str) -> FileResponse:
+    job = VEO_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    path = VEO_JOB_OUTPUT_DIR / f"{job_id}_preview.mp4"
+    if not path.exists():
+        raise HTTPException(status_code=409, detail="Preview not ready")
+
+    return FileResponse(path, media_type="video/mp4", filename=f"aerivon_{job_id}_preview.mp4")
 
 
 @app.websocket("/ws/veo/{job_id}")
@@ -2231,7 +2332,7 @@ async def ws_live(websocket: WebSocket) -> None:
             "If you are unsure, output your best guess."
         )
     else:
-        system_instruction = "You are Aerivon Live. Be concise and helpful."
+        system_instruction = _base_live_system_instruction()
         if memory_prompt:
             system_instruction = f"{system_instruction}\n\n{memory_prompt}"
 
@@ -2519,7 +2620,7 @@ async def ws_live(websocket: WebSocket) -> None:
         if mode != "stt":
             user_memory = await _load_user_memory(user_id=memory_user_id)
             memory_prompt = _memory_to_prompt(user_memory)
-            sys_instr = "You are Aerivon Live. Be concise and helpful."
+            sys_instr = _base_live_system_instruction()
             if memory_prompt:
                 sys_instr = (
                     f"{sys_instr}\n\n{memory_prompt}\n\n"
@@ -3028,7 +3129,7 @@ async def post_agent_message_stream(payload: AgentMessageRequest, request: Reque
         user_memory = await _load_user_memory(user_id=user_id)
         memory_prompt = _memory_to_prompt(user_memory)
 
-        system_instruction = "You are Aerivon Live. Be concise and helpful."
+        system_instruction = _base_live_system_instruction()
         if memory_prompt:
             system_instruction = f"{system_instruction}\n\n{memory_prompt}"
 
