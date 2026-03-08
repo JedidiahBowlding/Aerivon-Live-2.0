@@ -37,6 +37,7 @@
   let micStream: MediaStream | null = null;
   let finalTranscript = '';
   let stoppingIntentional = false;
+  let restartListeningAfterNoSpeech = false;
   let silenceTimer: ReturnType<typeof setTimeout> | null = null;
 
   let autoReadStory = true;
@@ -45,8 +46,19 @@
   let currentAudio: HTMLAudioElement | null = null;
   let currentAudioCtx: AudioContext | null = null;
   let currentBufferSource: AudioBufferSourceNode | null = null;
-  let lastPlayedAudioUrl = '';
-  let lastPlayedAudioMime = '';
+  let pcmQueue: Array<{ bytes: Uint8Array; mimeType?: string }> = [];
+  let pcmPlaybackActive = false;
+  let pcmRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastAudioTsProcessed = 0;
+  let autoBargeInArmed = false;
+
+  function clearPcmRestartTimer(): void {
+    if (!pcmRestartTimer) {
+      return;
+    }
+    clearTimeout(pcmRestartTimer);
+    pcmRestartTimer = null;
+  }
 
   function clearSilenceTimer(): void {
     if (!silenceTimer) {
@@ -74,20 +86,14 @@
       void currentAudioCtx.close();
       currentAudioCtx = null;
     }
+    pcmQueue = [];
+    pcmPlaybackActive = false;
+    autoBargeInArmed = false;
+    clearPcmRestartTimer();
     assistantSpeaking = false;
     if (emitInterrupt) {
       dispatch('interrupt', null);
     }
-  }
-
-  function latestAudioMessage(messages: StreamMessage[]): { url: string; mimeType?: string } | null {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const msg = messages[i];
-      if (msg.type === 'audio' && typeof msg.url === 'string' && msg.url.trim()) {
-        return { url: msg.url.trim(), mimeType: msg.mime_type };
-      }
-    }
-    return null;
   }
 
   function extractRateFromMime(mimeType: string | undefined): number {
@@ -115,6 +121,24 @@
 
     const b64 = url.slice(comma + 1);
     const bytes = decodeBase64ToBytes(b64);
+    return playPcmL16Bytes(bytes, mimeType);
+  }
+
+  function mergePcmChunks(chunks: Uint8Array[]): Uint8Array {
+    let total = 0;
+    for (const chunk of chunks) {
+      total += chunk.length;
+    }
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return merged;
+  }
+
+  async function playPcmL16Bytes(bytes: Uint8Array, mimeType: string | undefined): Promise<void> {
     if (bytes.length < 2) {
       throw new Error('PCM payload too short.');
     }
@@ -124,11 +148,38 @@
     const floats = new Float32Array(sampleCount);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
-    // Gemini WS streams PCM s16le; keep big-endian as fallback for L16 payloads.
-    const isLittleEndian = (mimeType || '').toLowerCase().includes('pcm');
+    // Gemini WS streams PCM s16le.
+    const isLittleEndian = true;
     for (let i = 0; i < sampleCount; i += 1) {
       const sample = view.getInt16(i * 2, isLittleEndian);
-      floats[i] = sample / 32768;
+      let normalized = sample / 32768;
+      // Small gate to suppress low-level hiss during pause regions.
+      if (Math.abs(normalized) < 0.0045) {
+        normalized = 0;
+      }
+      floats[i] = normalized;
+    }
+
+    // Smooth edges to avoid clicks between streamed chunks.
+    const fadeSamples = Math.min(Math.floor(sampleRate * 0.004), Math.floor(sampleCount / 2));
+    for (let i = 0; i < fadeSamples; i += 1) {
+      const g = i / Math.max(1, fadeSamples);
+      floats[i] *= g;
+      const tail = sampleCount - 1 - i;
+      if (tail >= 0) {
+        floats[tail] *= g;
+      }
+    }
+
+    let rms = 0;
+    for (let i = 0; i < sampleCount; i += 1) {
+      const v = floats[i];
+      rms += v * v;
+    }
+    rms = Math.sqrt(rms / sampleCount);
+    if (rms < 0.006) {
+      playNextPcmChunk();
+      return;
     }
 
     const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -136,7 +187,7 @@
       throw new Error('Web Audio API unavailable.');
     }
 
-    const ctx = new AudioContextCtor();
+    const ctx = currentAudioCtx ?? new AudioContextCtor();
     currentAudioCtx = ctx;
     const buffer = ctx.createBuffer(1, floats.length, sampleRate);
     buffer.copyToChannel(floats, 0);
@@ -146,19 +197,72 @@
     source.buffer = buffer;
     source.connect(ctx.destination);
     source.onended = () => {
-      assistantSpeaking = false;
       currentBufferSource = null;
-      if (currentAudioCtx) {
-        void currentAudioCtx.close();
-        currentAudioCtx = null;
-      }
-      if (handsFreeMode && !listening) {
-        void startListening();
-      }
+      playNextPcmChunk();
     };
 
     assistantSpeaking = true;
     source.start(0);
+  }
+
+  function maybeResumeMicAfterPcm(): void {
+    clearPcmRestartTimer();
+    pcmRestartTimer = setTimeout(() => {
+      if (handsFreeMode && !listening && !assistantSpeaking && pcmQueue.length === 0) {
+        void startListening();
+      }
+    }, 350);
+  }
+
+  function playNextPcmChunk(): void {
+    const next = pcmQueue.shift();
+    if (!next) {
+      pcmPlaybackActive = false;
+      assistantSpeaking = false;
+      autoBargeInArmed = false;
+      if (currentAudioCtx) {
+        void currentAudioCtx.close();
+        currentAudioCtx = null;
+      }
+      maybeResumeMicAfterPcm();
+      return;
+    }
+
+    clearPcmRestartTimer();
+    pcmPlaybackActive = true;
+    const mergedChunks: Uint8Array[] = [next.bytes];
+    let maxMerge = 5;
+    while (maxMerge > 0 && pcmQueue.length > 0) {
+      const peek = pcmQueue[0];
+      if ((peek.mimeType || '') !== (next.mimeType || '')) {
+        break;
+      }
+      pcmQueue.shift();
+      mergedChunks.push(peek.bytes);
+      maxMerge -= 1;
+    }
+    const merged = mergePcmChunks(mergedChunks);
+
+    void playPcmL16Bytes(merged, next.mimeType).catch(() => {
+      micError = 'Gemini audio decode failed. Please try again.';
+      pcmPlaybackActive = false;
+      assistantSpeaking = false;
+      autoBargeInArmed = false;
+      playNextPcmChunk();
+    });
+  }
+
+  function enqueuePcmChunk(url: string, mimeType?: string): void {
+    const comma = url.indexOf(',');
+    if (comma < 0) {
+      return;
+    }
+    const b64 = url.slice(comma + 1);
+    const bytes = decodeBase64ToBytes(b64);
+    pcmQueue.push({ bytes, mimeType });
+    if (!pcmPlaybackActive) {
+      playNextPcmChunk();
+    }
   }
 
   function playGeminiAudio(url: string, mimeType?: string): void {
@@ -170,25 +274,25 @@
       return;
     }
 
-    if (currentAudio || currentBufferSource || currentAudioCtx) {
-      stopAssistantVoice(false);
-    }
-
     const normalizedMime = (mimeType || '').toLowerCase();
     if (normalizedMime.includes('audio/l16') || normalizedMime.includes('audio/pcm')) {
-      void playPcmL16DataUrl(url, mimeType).catch(() => {
-        micError = 'Gemini audio decode failed. Please try again.';
-        assistantSpeaking = false;
-      });
+      autoBargeInArmed = true;
+      enqueuePcmChunk(url, mimeType);
       return;
+    }
+
+    if (currentAudio || currentBufferSource || currentAudioCtx) {
+      stopAssistantVoice(false);
     }
 
     const player = new Audio(url);
     player.onplay = () => {
       assistantSpeaking = true;
+      autoBargeInArmed = true;
     };
     player.onended = () => {
       assistantSpeaking = false;
+      autoBargeInArmed = false;
       currentAudio = null;
       if (handsFreeMode && !listening) {
         void startListening();
@@ -197,6 +301,7 @@
     player.onerror = () => {
       micError = 'Audio playback failed for streamed model voice.';
       assistantSpeaking = false;
+      autoBargeInArmed = false;
       currentAudio = null;
     };
 
@@ -258,6 +363,15 @@
       }
       prompt = `${finalTranscript}${interim}`.trim();
 
+      if (handsFreeMode && assistantSpeaking && autoBargeInArmed) {
+        const normalized = prompt.replace(/\s+/g, ' ').trim();
+        // Avoid false interrupts from tiny recognition artifacts.
+        if (normalized.length >= 8) {
+          autoBargeInArmed = false;
+          stopAssistantVoice(true);
+        }
+      }
+
       clearSilenceTimer();
       if (prompt) {
         // Natural turn-taking: send after a short pause instead of requiring manual stop.
@@ -271,6 +385,14 @@
     };
 
     recognition.onerror = (event: Event & { error?: string }) => {
+      const errorCode = (event.error || '').toLowerCase();
+      if (errorCode === 'no-speech') {
+        micError = 'Mic timeout: no speech detected. Listening again...';
+        restartListeningAfterNoSpeech = listening;
+        clearSilenceTimer();
+        return;
+      }
+
       micError = event.error ? `Mic error: ${event.error}` : 'Microphone error occurred.';
       listening = false;
       isListening.set(false);
@@ -280,11 +402,18 @@
 
     recognition.onend = () => {
       const shouldSubmit = stoppingIntentional;
+      const shouldRestart = restartListeningAfterNoSpeech;
       stoppingIntentional = false;
+      restartListeningAfterNoSpeech = false;
       listening = false;
       isListening.set(false);
       releaseMic();
       clearSilenceTimer();
+
+      if (shouldRestart && handsFreeMode && !pendingPrompt.trim()) {
+        void startListening();
+        return;
+      }
 
       if (shouldSubmit && finalTranscript.trim()) {
         queuePromptForConfirmation(finalTranscript, true);
@@ -323,7 +452,14 @@
 
     try {
       // This is what triggers the browser mic permission prompt.
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
       stoppingIntentional = false;
       recognition.start();
       listening = true;
@@ -414,16 +550,19 @@
   }
 
   $: if (autoReadStory) {
-    const audio = latestAudioMessage($streamMessages);
-    if (audio && (audio.url !== lastPlayedAudioUrl || (audio.mimeType || '') !== lastPlayedAudioMime)) {
-      lastPlayedAudioUrl = audio.url;
-      lastPlayedAudioMime = audio.mimeType || '';
-      playGeminiAudio(audio.url, audio.mimeType);
+    const pendingAudio = $streamMessages.filter(
+      (msg): msg is StreamMessage & { type: 'audio'; url: string } =>
+        msg.type === 'audio' && typeof msg.url === 'string' && msg.ts > lastAudioTsProcessed
+    );
+    for (const msg of pendingAudio) {
+      playGeminiAudio(msg.url, msg.mime_type);
+      lastAudioTsProcessed = msg.ts;
     }
   }
 
   onDestroy(() => {
     clearSilenceTimer();
+    clearPcmRestartTimer();
     stopAssistantVoice(false);
     releaseMic();
   });

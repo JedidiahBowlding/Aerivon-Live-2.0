@@ -16,10 +16,11 @@
   };
 
   const dispatch = createEventDispatcher<{ videoReady: VideoReadyEvent }>();
+  const SUPPORTED_DURATIONS = [30, 45, 60] as const;
 
   let prompt = 'Create a cinematic 45-second product demo of Aerivon Live V2 showing voice interaction, planning, navigation, storytelling, and value outcome.';
   let model = 'veo-3.1-generate-001';
-  let durationSeconds = 6;
+  let durationSeconds = 45;
   let aspectRatio = '16:9';
 
   let isRunning = false;
@@ -113,6 +114,10 @@
 
     closeStatusSocket();
 
+    const normalizedDuration = SUPPORTED_DURATIONS.includes(durationSeconds as 30 | 45 | 60)
+      ? durationSeconds
+      : 45;
+
     try {
       const response = await fetch(`${apiBase()}/veo/jobs`, {
         method: 'POST',
@@ -122,7 +127,7 @@
         body: JSON.stringify({
           prompt,
           model,
-          duration_seconds: durationSeconds,
+          duration_seconds: normalizedDuration,
           aspect_ratio: aspectRatio
         })
       });
@@ -203,13 +208,14 @@
       </label>
       <label class="text-xs text-cyan-100/75">
         Clip Seconds
-        <input
+        <select
           bind:value={durationSeconds}
-          type="number"
-          min="4"
-          max="60"
           class="mt-1 w-full rounded-md border border-cyan-300/25 bg-slate-950/55 px-2 py-1.5 text-sm text-cyan-50 outline-none focus:border-cyan-300/60"
-        />
+        >
+          {#each SUPPORTED_DURATIONS as seconds}
+            <option value={seconds}>{seconds}</option>
+          {/each}
+        </select>
       </label>
       <label class="text-xs text-cyan-100/75">
         Aspect

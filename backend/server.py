@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -133,6 +135,7 @@ RATE_LIMIT_SECONDS = 1.0
 MAX_RESULT_SIZE = 20000
 MAX_WS_MESSAGE_BYTES = 256 * 1024
 DEFAULT_LIVE_AUDIO_SAMPLE_RATE = int(os.getenv("AERIVON_LIVE_AUDIO_SAMPLE_RATE", "24000"))
+SUPPORTED_VEO_DURATIONS = (4, 6, 8)
 
 API_KEY_ENV_VARS = ("GOOGLE_CLOUD_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
 
@@ -166,6 +169,105 @@ def _make_genai_client(*, prefer_vertex: bool, project: str | None, location: st
         "Missing credentials. Set GOOGLE_GENAI_USE_VERTEXAI=true + GOOGLE_CLOUD_PROJECT (and ADC), "
         "or set an API key env var (GEMINI_API_KEY / GOOGLE_API_KEY / GOOGLE_CLOUD_API_KEY)."
     )
+
+
+def _normalize_veo_clip_duration(seconds: int) -> int:
+    if seconds in SUPPORTED_VEO_DURATIONS:
+        return seconds
+    return min(SUPPORTED_VEO_DURATIONS, key=lambda d: abs(d - int(seconds)))
+
+
+def _split_veo_duration(total_seconds: int) -> list[int]:
+    total = max(4, min(60, int(total_seconds)))
+
+    # Dynamic programming over supported clip durations to compose a target runtime.
+    solutions: dict[int, list[int]] = {0: []}
+    for t in range(1, total + 1):
+        best: list[int] | None = None
+        for d in SUPPORTED_VEO_DURATIONS:
+            prev = t - d
+            if prev < 0 or prev not in solutions:
+                continue
+            cand = solutions[prev] + [d]
+            if best is None or len(cand) < len(best):
+                best = cand
+        if best is not None:
+            solutions[t] = best
+
+    if total in solutions:
+        return solutions[total]
+
+    # Fallback: use nearest representable duration if exact composition is impossible.
+    representable = [k for k in solutions.keys() if k > 0]
+    if not representable:
+        return [6]
+    nearest = min(representable, key=lambda k: (abs(k - total), -k))
+    return solutions[nearest]
+
+
+def _resolve_ffmpeg_executable() -> str:
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin:
+        return ffmpeg_bin
+
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:
+        raise RuntimeError(
+            "ffmpeg is required to stitch multi-clip Veo videos. Install ffmpeg or add imageio-ffmpeg."
+        ) from exc
+
+
+def _stitch_video_segments(segment_paths: list[Path], output_path: Path) -> None:
+    if not segment_paths:
+        raise RuntimeError("No segment paths provided for Veo stitch.")
+
+    ffmpeg_bin = _resolve_ffmpeg_executable()
+    concat_file = output_path.parent / "concat_list.txt"
+    concat_file.write_text(
+        "\n".join([f"file '{p.resolve()}'" for p in segment_paths]) + "\n",
+        encoding="utf-8",
+    )
+
+    cmd_copy = [
+        ffmpeg_bin,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_file),
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+    proc = subprocess.run(cmd_copy, capture_output=True, text=True)
+    if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        return
+
+    # Fallback re-encode when stream-copy concat isn't possible.
+    cmd_encode = [
+        ffmpeg_bin,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_file),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        str(output_path),
+    ]
+    proc2 = subprocess.run(cmd_encode, capture_output=True, text=True)
+    if proc2.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
+        raise RuntimeError(f"Failed to stitch Veo segments: {proc2.stderr or proc.stderr}")
 
 
 def _coerce_to_list(value: Any) -> list[Any]:
@@ -412,21 +514,49 @@ async def _run_veo_job(job_id: str) -> None:
 
     prompt = str(job.get("prompt") or "").strip()
     model = str(job.get("model") or "veo-3.1-generate-001").strip()
-    duration_seconds = int(job.get("duration_seconds") or 6)
+    requested_duration = max(4, min(60, int(job.get("duration_seconds") or 6)))
+    segment_durations = _split_veo_duration(requested_duration)
     aspect_ratio = str(job.get("aspect_ratio") or "16:9")
+    job["duration_seconds"] = requested_duration
 
     try:
-        await _veo_publish(job_id, {"status": "running", "progress": 35})
-        video_bytes = await asyncio.to_thread(
-            _generate_veo_video_blocking,
-            prompt=prompt,
-            model=model,
-            duration_seconds=duration_seconds,
-            aspect_ratio=aspect_ratio,
-        )
+        segment_bytes: list[bytes] = []
+        total_segments = max(1, len(segment_durations))
+        for idx, seg_duration in enumerate(segment_durations, start=1):
+            progress = 20 + int(((idx - 1) / total_segments) * 55)
+            await _veo_publish(
+                job_id,
+                {
+                    "status": "running",
+                    "progress": progress,
+                },
+            )
+            clip_prompt = (
+                f"{prompt}\n"
+                f"This is segment {idx} of {total_segments}. Keep continuity with previous segments."
+            )
+            clip = await asyncio.to_thread(
+                _generate_veo_video_blocking,
+                prompt=clip_prompt,
+                model=model,
+                duration_seconds=seg_duration,
+                aspect_ratio=aspect_ratio,
+            )
+            segment_bytes.append(clip)
 
         out_path = VEO_JOB_OUTPUT_DIR / f"{job_id}.mp4"
-        out_path.write_bytes(video_bytes)
+        if len(segment_bytes) == 1:
+            out_path.write_bytes(segment_bytes[0])
+        else:
+            with tempfile.TemporaryDirectory(prefix=f"aerivon_veo_{job_id}_") as tmpdir:
+                tmp = Path(tmpdir)
+                segment_paths: list[Path] = []
+                for idx, clip in enumerate(segment_bytes, start=1):
+                    seg_path = tmp / f"segment_{idx:02d}.mp4"
+                    seg_path.write_bytes(clip)
+                    segment_paths.append(seg_path)
+                await _veo_publish(job_id, {"status": "running", "progress": 80})
+                await asyncio.to_thread(_stitch_video_segments, segment_paths, out_path)
 
         await _veo_publish(
             job_id,
@@ -1448,7 +1578,7 @@ async def ws_story(websocket: WebSocket) -> None:
 
         try:
             model = os.getenv("AERIVON_VIDEO_MODEL", "veo-3.1-generate-001").strip() or "veo-3.1-generate-001"
-            duration_seconds = max(4, min(60, int(os.getenv("AERIVON_VIDEO_DURATION_SECONDS", "5"))))
+            duration_seconds = _normalize_veo_clip_duration(int(os.getenv("AERIVON_VIDEO_DURATION_SECONDS", "6")))
             aspect_ratio = os.getenv("AERIVON_VIDEO_ASPECT_RATIO", "16:9").strip() or "16:9"
 
             scene_prompt = (
@@ -1674,7 +1804,7 @@ class SpeakRequest(BaseModel):
 class VeoJobRequest(BaseModel):
     prompt: str = Field(min_length=8, max_length=5000)
     model: str = Field(default_factory=lambda: os.getenv("AERIVON_VIDEO_MODEL", "veo-3.1-generate-001"))
-    duration_seconds: int = Field(default=6, ge=4, le=60)
+    duration_seconds: int = Field(default=30, ge=4, le=60)
     aspect_ratio: str = Field(default="16:9")
 
 
@@ -1683,13 +1813,15 @@ async def create_veo_job(payload: VeoJobRequest, request: Request) -> dict[str, 
     job_id = uuid4().hex[:12]
     created_at = time.time()
 
+    duration_seconds = max(4, min(60, int(payload.duration_seconds)))
+
     job = {
         "job_id": job_id,
         "status": "queued",
         "progress": 0,
         "prompt": payload.prompt.strip(),
         "model": payload.model.strip() or "veo-3.1-generate-001",
-        "duration_seconds": int(payload.duration_seconds),
+        "duration_seconds": duration_seconds,
         "aspect_ratio": payload.aspect_ratio.strip() or "16:9",
         "video_url": None,
         "error": None,

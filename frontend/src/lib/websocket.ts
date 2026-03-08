@@ -35,6 +35,7 @@ export type AerivonSocketMessage =
   | { type: 'transcript'; text: string; finished?: boolean }
   | { type: 'image'; url?: string; data_b64?: string; mime_type?: string }
   | { type: 'audio'; url?: string; data_b64?: string; mime_type?: string }
+  | { type: 'audio_config'; sample_rate?: number; mime_type?: string }
   | { type: 'video'; url?: string; data_b64?: string; mime_type?: string }
   | { type: 'action'; action: string }
   | { type: 'browser'; screenshot: string | null; url?: string }
@@ -46,6 +47,7 @@ export type AerivonSocketMessage =
 
 let ws: WebSocket | null = null;
 let planCursor = -1;
+let currentAudioSampleRate = 24000;
 
 function forceSecureWs(url: string): string {
   if (browser && location.protocol === 'https:' && url.startsWith('ws://')) {
@@ -201,6 +203,7 @@ export function connectAerivonSocket(): WebSocket | null {
     socketState.set('connected');
     setCurrentExecutingStep(null);
     pushStep('Listening');
+    currentAudioSampleRate = 24000;
   };
 
   ws.onmessage = (event: MessageEvent<string>) => {
@@ -217,6 +220,15 @@ export function connectAerivonSocket(): WebSocket | null {
 
     const ts = Date.now();
     markEventReceived(ts);
+
+    if (data.type === 'audio_config') {
+      const sr = Number(data.sample_rate || 0);
+      if (Number.isFinite(sr) && sr > 0) {
+        currentAudioSampleRate = Math.round(sr);
+      }
+      return;
+    }
+
     if (data.type === 'browser') {
       browserScreenshot.set(data.screenshot);
       if (typeof data.url === 'string' && data.url.trim()) {
@@ -291,7 +303,10 @@ export function connectAerivonSocket(): WebSocket | null {
     }
 
     if (data.type === 'audio') {
-      const mime = (typeof data.mime_type === 'string' && data.mime_type.trim()) ? data.mime_type.trim() : 'audio/pcm';
+      let mime = (typeof data.mime_type === 'string' && data.mime_type.trim()) ? data.mime_type.trim() : 'audio/pcm';
+      if (mime.toLowerCase().startsWith('audio/pcm') && !/rate=\d+/i.test(mime)) {
+        mime = `${mime};rate=${currentAudioSampleRate}`;
+      }
       const resolvedUrl =
         (typeof data.url === 'string' && data.url.trim())
           ? data.url.trim()
@@ -345,6 +360,7 @@ export function connectAerivonSocket(): WebSocket | null {
 
   ws.onclose = () => {
     socketState.set('disconnected');
+    currentAudioSampleRate = 24000;
   };
 
   return ws;
