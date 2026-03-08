@@ -287,10 +287,10 @@
       clearSilenceTimer();
 
       if (shouldSubmit && finalTranscript.trim()) {
-        queuePromptForConfirmation(finalTranscript);
+        queuePromptForConfirmation(finalTranscript, true);
       } else if (shouldSubmit && prompt.trim()) {
         // Fallback when the recognizer delivered interim text but no final segment.
-        queuePromptForConfirmation(prompt);
+        queuePromptForConfirmation(prompt, true);
       }
 
       finalTranscript = '';
@@ -371,11 +371,21 @@
     }
   }
 
-  function queuePromptForConfirmation(text: string): void {
+  function queuePromptForConfirmation(text: string, fromVoice = false): void {
     const normalized = text.trim();
     if (!normalized) {
       return;
     }
+
+    // Keep spoken interaction fully conversational in hands-free mode.
+    if (fromVoice && handsFreeMode) {
+      dispatch('submit', { text: normalized });
+      pushStep('Planning');
+      pendingPrompt = '';
+      prompt = '';
+      return;
+    }
+
     pendingPrompt = normalized;
     prompt = normalized;
   }

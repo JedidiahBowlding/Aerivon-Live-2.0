@@ -168,26 +168,108 @@ def _make_genai_client(*, prefer_vertex: bool, project: str | None, location: st
     )
 
 
-def _extract_generated_videos_from_operation(operation: Any) -> list[Any]:
-    response = getattr(operation, "response", None)
-    if response is None:
+def _coerce_to_list(value: Any) -> list[Any]:
+    if value is None:
         return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
 
-    for attr in ("generated_videos", "generatedVideos", "videos"):
-        val = getattr(response, attr, None)
-        if isinstance(val, list):
-            return val
 
-    if isinstance(response, dict):
-        for key in ("generated_videos", "generatedVideos", "videos"):
-            val = response.get(key)
-            if isinstance(val, list):
-                return val
+def _extract_operation_error_text(operation: Any) -> str:
+    err = getattr(operation, "error", None)
+    if err is None and isinstance(operation, dict):
+        err = operation.get("error")
+    if err is None:
+        return ""
+
+    if isinstance(err, str):
+        return err
+
+    code = getattr(err, "code", None)
+    message = getattr(err, "message", None)
+    details = getattr(err, "details", None)
+    if isinstance(err, dict):
+        code = err.get("code", code)
+        message = err.get("message", message)
+        details = err.get("details", details)
+
+    parts: list[str] = []
+    if code not in (None, ""):
+        parts.append(f"code={code}")
+    if message:
+        parts.append(str(message))
+    if details:
+        parts.append(f"details={details}")
+    return "; ".join(parts)
+
+
+def _refresh_operation(operations_api: Any, operation: Any) -> Any:
+    if operations_api is None or not hasattr(operations_api, "get"):
+        return operation
+
+    op_name = getattr(operation, "name", None)
+    try:
+        if op_name:
+            return operations_api.get(name=op_name)
+    except TypeError:
+        pass
+    except Exception:
+        pass
+
+    try:
+        if op_name:
+            return operations_api.get(op_name)
+    except Exception:
+        pass
+
+    try:
+        return operations_api.get(operation)
+    except Exception:
+        return operation
+
+
+def _extract_generated_videos_from_operation(operation: Any) -> list[Any]:
+    candidates = [
+        operation,
+        getattr(operation, "response", None),
+        getattr(operation, "result", None),
+        getattr(operation, "metadata", None),
+    ]
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+
+        for attr in ("generated_videos", "generatedVideos", "generated_video", "video", "videos"):
+            val = getattr(candidate, attr, None)
+            values = _coerce_to_list(val)
+            if values:
+                return values
+
+        if isinstance(candidate, dict):
+            for key in ("generated_videos", "generatedVideos", "generated_video", "video", "videos"):
+                val = candidate.get(key)
+                values = _coerce_to_list(val)
+                if values:
+                    return values
+
+            # Some responses may wrap the payload under result/output/response.
+            for container_key in ("result", "output", "response"):
+                container = candidate.get(container_key)
+                if isinstance(container, dict):
+                    for key in ("generated_videos", "generatedVideos", "generated_video", "video", "videos"):
+                        val = container.get(key)
+                        values = _coerce_to_list(val)
+                        if values:
+                            return values
 
     return []
 
 
-def _extract_video_bytes(video_ref: Any) -> bytes | None:
+def _extract_video_bytes(client: Any, video_ref: Any) -> bytes | None:
     candidates = [
         video_ref,
         getattr(video_ref, "video", None),
@@ -209,6 +291,18 @@ def _extract_video_bytes(video_ref: Any) -> bytes | None:
         video_bytes = getattr(cand, "video_bytes", None)
         if isinstance(video_bytes, (bytes, bytearray)):
             return bytes(video_bytes)
+
+        files_api = getattr(client, "files", None)
+        if files_api is not None and hasattr(files_api, "download"):
+            try:
+                downloaded = files_api.download(file=cand)
+                if isinstance(downloaded, (bytes, bytearray)):
+                    return bytes(downloaded)
+                payload = getattr(downloaded, "data", None)
+                if isinstance(payload, (bytes, bytearray)):
+                    return bytes(payload)
+            except Exception:
+                continue
 
     return None
 
@@ -236,16 +330,37 @@ def _generate_veo_video_blocking(*, prompt: str, model: str, duration_seconds: i
         raise RuntimeError("Installed google-genai SDK does not expose generate_videos().")
 
     operations_api = getattr(client, "operations", None)
-    if operations_api is not None and hasattr(operations_api, "get"):
-        while not bool(getattr(operation, "done", False)):
-            time.sleep(8)
-            operation = operations_api.get(operation)
+    poll_seconds = max(1.0, float(os.getenv("AERIVON_VIDEO_POLL_SECONDS", "8")))
+    max_polls = max(1, int(os.getenv("AERIVON_VIDEO_MAX_POLLS", "90")))
+    polls = 0
+
+    while not bool(getattr(operation, "done", False)) and polls < max_polls:
+        time.sleep(poll_seconds)
+        operation = _refresh_operation(operations_api, operation)
+        polls += 1
+
+    if not bool(getattr(operation, "done", False)):
+        op_name = getattr(operation, "name", "")
+        raise TimeoutError(
+            f"Veo operation timed out after {polls} polls (name={op_name})."
+        )
+
+    op_error = _extract_operation_error_text(operation)
+    if op_error:
+        raise RuntimeError(f"Veo operation failed: {op_error}")
 
     generated = _extract_generated_videos_from_operation(operation)
     if not generated:
-        raise RuntimeError("Veo finished without generated video output.")
+        response = getattr(operation, "response", None)
+        response_type = type(response).__name__
+        response_keys = list(response.keys()) if isinstance(response, dict) else []
+        op_name = getattr(operation, "name", "")
+        raise RuntimeError(
+            "Veo finished without generated video output "
+            f"(name={op_name}, response_type={response_type}, response_keys={response_keys})."
+        )
 
-    video_bytes = _extract_video_bytes(generated[0])
+    video_bytes = _extract_video_bytes(client, generated[0])
     if not video_bytes:
         raise RuntimeError("Veo finished but no downloadable video bytes were found.")
 
