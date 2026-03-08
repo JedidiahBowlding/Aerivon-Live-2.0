@@ -3,18 +3,20 @@
 Aerivon Live V2 is a multimodal agent system for the Gemini Live Agent Challenge. It combines:
 
 - Live voice interaction
+- Voice interruption with explicit interrupt acknowledgment
 - UI navigation and visual analysis
 - Story and illustration generation
-- Veo-powered video generation with job status streaming
+- Veo-powered video generation with fast preview + job status streaming
 
 This README is written for judges to run and deploy quickly.
 
 ## What Judges Can Verify
 
 - Voice prompt ingestion and interruption handling
+- Visible interrupt acknowledgment in UI logs and timeline reset to listening
 - Agent planning/action timeline
 - Website exploration + visual reasoning
-- Auto-triggered Veo video generation from voice/text prompts
+- Auto-triggered Veo video generation from voice/text prompts (including fast preview)
 - End-to-end backend/frontend deployment on Google Cloud Run
 
 ## Repo Structure
@@ -47,7 +49,7 @@ export GOOGLE_GENAI_USE_VERTEXAI=True
 export GOOGLE_CLOUD_PROJECT="<your-project-id>"
 export GOOGLE_CLOUD_LOCATION="us-central1"
 export AERIVON_MEMORY_BUCKET="<your-memory-bucket>"
-export AERIVON_VIDEO_MODEL="veo-3.0-generate-001"
+export AERIVON_VIDEO_MODEL="veo-3.1-generate-001"
 
 uvicorn server:app --host 0.0.0.0 --port 8081
 ```
@@ -60,7 +62,7 @@ npm install
 
 # Optional, but recommended for local explicit config
 export VITE_AERIVON_API_URL="http://localhost:8081"
-export VITE_AERIVON_WS_URL="ws://localhost:8081/ws/story"
+export VITE_AERIVON_WS_URL="ws://localhost:8081/ws/live"
 
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
@@ -84,7 +86,8 @@ Optional:
 - `REGION` (default `us-central1`)
 - `BACKEND_SERVICE` (default `aerivon-live-agent`)
 - `FRONTEND_SERVICE` (default `aerivon-live-frontend`)
-- `VIDEO_MODEL` (default `veo-3.0-generate-001`)
+- `VIDEO_MODEL` (default `veo-3.1-generate-001`)
+- `AERIVON_VEO_PARALLELISM` (default 3, bounded in backend)
 
 ### 2) Run deployment
 
@@ -120,11 +123,24 @@ gcloud run services describe aerivon-live-frontend \
 ## Key Backend Endpoints
 
 - `GET /health`
-- `WS /ws/story` (main frontend stream)
+- `WS /ws/live` (main frontend stream)
 - `POST /veo/jobs` (start Veo generation)
 - `GET /veo/jobs/{job_id}` (status)
 - `WS /ws/veo/{job_id}` (live job status updates)
+- `GET /veo/jobs/{job_id}/preview` (early preview when `fast_preview=true`)
 - `GET /veo/jobs/{job_id}/video` (generated video file)
+
+## Interrupt Behavior
+
+- User can interrupt via the `Interrupt` button or by hands-free barge-in while the agent is speaking.
+- Backend sends `{"type":"interrupted","source":"client"}` when an interrupt is received.
+- Frontend surfaces this as `interrupt_ack:<source>` in action logs and immediately returns timeline state to `Listening`.
+
+## Fast Veo Preview
+
+- Submit Veo jobs with `fast_preview=true` for earlier visual feedback.
+- While status is `running`, `preview_video_url` may become available before final completion.
+- Final output remains available at `/veo/jobs/{job_id}/video` when status reaches `completed`.
 
 ## Example Judge Prompts
 

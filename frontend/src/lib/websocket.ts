@@ -38,6 +38,10 @@ export type AerivonSocketMessage =
   | { type: 'audio_config'; sample_rate?: number; mime_type?: string }
   | { type: 'video'; url?: string; data_b64?: string; mime_type?: string }
   | { type: 'action'; action: string }
+  | { type: 'interrupted'; source?: string }
+  | { type: 'status'; status?: string; reason?: string; detail?: string }
+  | { type: 'turn_complete' }
+  | { type: 'error'; error?: string }
   | { type: 'browser'; screenshot: string | null; url?: string }
   | {
       type: 'plan';
@@ -262,6 +266,51 @@ export function connectAerivonSocket(): WebSocket | null {
       }
 
       pushMessage({ type: 'action', action: data.action, ts });
+      return;
+    }
+
+    if (data.type === 'interrupted') {
+      pushStep('Listening');
+      advanceExecutingStep('interrupted');
+      pushMessage({
+        type: 'action',
+        action: `interrupt_ack:${(data.source || 'unknown').toLowerCase()}`,
+        ts
+      });
+      return;
+    }
+
+    if (data.type === 'status') {
+      const status = (data.status || '').toLowerCase();
+      if (status === 'connected') {
+        pushStep('Listening');
+        advanceExecutingStep('listening');
+      } else if (status === 'restarting') {
+        pushStep('Listening');
+        advanceExecutingStep('interrupted');
+      }
+
+      const statusSuffix = data.reason ? `:${data.reason}` : '';
+      pushMessage({
+        type: 'action',
+        action: `session_status:${status || 'unknown'}${statusSuffix}`,
+        ts
+      });
+      return;
+    }
+
+    if (data.type === 'turn_complete') {
+      markRunCompleted(ts);
+      pushMessage({ type: 'action', action: 'turn_complete', ts });
+      return;
+    }
+
+    if (data.type === 'error') {
+      pushMessage({
+        type: 'action',
+        action: `session_error:${(data.error || 'unknown').toString()}`,
+        ts
+      });
       return;
     }
 

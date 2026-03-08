@@ -36,6 +36,7 @@
   let recognition: SpeechRecognitionLike | null = null;
   let micStream: MediaStream | null = null;
   let finalTranscript = '';
+  let lastHeardTranscript = '';
   let stoppingIntentional = false;
   let restartListeningAfterNoSpeech = false;
   let silenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -362,6 +363,7 @@
         }
       }
       prompt = `${finalTranscript}${interim}`.trim();
+      lastHeardTranscript = prompt;
 
       if (handsFreeMode && assistantSpeaking && autoBargeInArmed) {
         const normalized = prompt.replace(/\s+/g, ' ').trim();
@@ -393,11 +395,20 @@
         return;
       }
 
+      // If capture is interrupted (for example mic toggled at OS/hardware level),
+      // keep the turn moving by using the best transcript gathered so far.
+      const recoveredText = (finalTranscript || lastHeardTranscript || prompt).trim();
+      if (recoveredText) {
+        queuePromptForConfirmation(recoveredText, true);
+      }
+
       micError = event.error ? `Mic error: ${event.error}` : 'Microphone error occurred.';
       listening = false;
       isListening.set(false);
       releaseMic();
       clearSilenceTimer();
+      finalTranscript = '';
+      lastHeardTranscript = '';
     };
 
     recognition.onend = () => {
@@ -420,9 +431,13 @@
       } else if (shouldSubmit && prompt.trim()) {
         // Fallback when the recognizer delivered interim text but no final segment.
         queuePromptForConfirmation(prompt, true);
+      } else if (!shouldSubmit && lastHeardTranscript.trim()) {
+        // Recognition may end without an explicit stop event in some browsers.
+        queuePromptForConfirmation(lastHeardTranscript, true);
       }
 
       finalTranscript = '';
+      lastHeardTranscript = '';
     };
 
     return true;
@@ -431,6 +446,7 @@
   async function startListening(): Promise<void> {
     micError = '';
     finalTranscript = '';
+    lastHeardTranscript = '';
 
     if (pendingPrompt.trim()) {
       micError = 'Review and confirm, edit, or cancel the pending prompt first.';
