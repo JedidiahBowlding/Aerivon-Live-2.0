@@ -21,7 +21,8 @@ This README is written for judges to run and deploy quickly.
 
 ## Proof Video
 
-- Judge proof video is in `proof/Screen Recording 2026-03-15 at 1.22.52 AM.mov`.
+- Primary playable file for judges: `proof/judge-proof.mp4`.
+- Original source capture (download fallback): `proof/Screen Recording 2026-03-15 at 1.22.52 AM.mov`.
 
 ## Repo Structure
 

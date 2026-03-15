@@ -55,3 +55,4 @@ tmp/
 temp/
 demo_video_output*/
 *.mp4
+!proof/judge-proof.mp4
