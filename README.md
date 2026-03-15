@@ -19,10 +19,15 @@ This README is written for judges to run and deploy quickly.
 - Auto-triggered Veo video generation from voice/text prompts (including fast preview)
 - End-to-end backend/frontend deployment on Google Cloud Run
 
+## Proof Video
+
+- Judge proof video is in `proof/Screen Recording 2026-03-15 at 1.22.52 AM.mov`.
+
 ## Repo Structure
 
 - `backend/` - FastAPI backend, WebSocket endpoints, Veo job APIs
 - `frontend/` - SvelteKit UI (timeline, stream, Veo panel)
+- `proof/` - short judge-facing proof/demo video
 - `cloudbuild.yaml` - Cloud Build pipeline for backend + frontend deploy
 - `scripts/deploy_cloud_build.sh` - one-command deployment wrapper
 - `ARCHITECTURE_DIAGRAM.md` - system architecture diagram
